@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage Gate Prototype</title>
+<!-- PROTOTYPE, throwaway. Lives on branch prototype/usage-gate only. Answers wayfinder ticket #6. -->
+<style>
+  :root { --ink:#1d1d1f; --mute:#6e6e73; --line:#e3e3e8; --bg:#fbfbfd; --card:#fff; --accent:#2f5bd3; --warn:#b4530a; --bad:#b42318; --ok:#1a7f37; }
+  @media (prefers-color-scheme: dark) { :root { --ink:#f2f2f5; --mute:#a1a1a8; --line:#33333a; --bg:#151518; --card:#1d1d21; --accent:#7d9cff; --warn:#f0a35e; --bad:#ff7b72; --ok:#56d364; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system, system-ui, sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; } h2 { font-size:15px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); }
+  p.lead { color:var(--mute); margin:0 0 20px; max-width:760px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:760px){ .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:0; }
+  dt { color:var(--mute); } dd { margin:0; font-variant-numeric:tabular-nums; }
+  .bar { height:10px; background:var(--line); border-radius:5px; position:relative; margin:4px 0 2px; }
+  .bar > i { position:absolute; inset:0 auto 0 0; background:var(--accent); border-radius:5px; }
+  .bar > b { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--warn); }
+  .bar > s { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--bad); }
+  button { font:inherit; padding:7px 12px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; margin:0 6px 6px 0; }
+  button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .status { font-weight:600; } .running{color:var(--ok);} .paused{color:var(--warn);} .ended,.stuck{color:var(--bad);}
+  .verdict { padding:10px 12px; border-radius:8px; border:1px solid var(--line); margin-top:10px; }
+  .log { max-height:260px; overflow:auto; font-size:13px; } .log div { padding:3px 0; border-bottom:1px solid var(--line); }
+  .changed { background:color-mix(in srgb, var(--accent) 14%, transparent); border-radius:4px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } td,th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); } th { color:var(--mute); font-weight:500; }
+  .tabs button.on { border-color:var(--accent); color:var(--accent); }
+  .steps button.next { background:var(--accent); color:#fff; border-color:var(--accent); }
+  label { margin-right:12px; } .note { color:var(--mute); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Usage gate prototype</h1>
+<p class="lead">
+  <strong>Question:</strong> before each step of a ticket, the shift reads plan usage from the desktop app. Does the rule
+  "admit below the threshold, let an admitted ticket finish within a small reserve, pause at the threshold, resume after the
+  5-hour reset, end the shift at the weekly ceiling" behave sensibly in the awkward cases? And can the ledger record usage per ticket?
+  Step costs here are illustrative, not measured. Readings are whole percentages, as the real tool returns.
+</p>
+
+<div class="grid">
+  <section class="card">
+    <h2>Shift settings (chosen at kickoff)</h2>
+    <div id="settings"></div>
+  </section>
+  <section class="card">
+    <h2>Now</h2>
+    <div id="now"></div>
+  </section>
+  <section class="card">
+    <h2>Free play</h2>
+    <button class="primary" onclick="act('step')">Run the next step</button>
+    <button onclick="act('wake')">Resume fires (at reset + 3 min)</button>
+    <button onclick="act('other')">Builder uses Claude elsewhere (+10 points)</button>
+    <button onclick="act('unreadable')">Next usage read fails</button>
+    <button onclick="act('waive')">Waive weekly ceiling for this shift</button>
+    <button onclick="act('reset')">Reset</button>
+    <div id="verdict"></div>
+  </section>
+  <section class="card">
+    <h2>Ledger: usage per ticket</h2>
+    <div id="ledger"></div>
+  </section>
+  <section class="card" style="grid-column:1/-1">
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="tabs"></div>
+    <p id="scenarioText"></p>
+    <div class="steps" id="steps"></div>
+  </section>
+  <section class="card" style="grid-column:1/-1">
+    <h2>Shift log</h2>
+    <div class="log" id="log"></div>
+  </section>
+</div>
+</main>
+
+<script>
+// ===== The portable logic: pure functions, no DOM. This is the part worth lifting into cli/. =====
+const UsageGate = (() => {
+  const HARD_LIMIT = 100;
+
+  // Shift config from the kickoff question. reserve is capped so threshold+reserve never reaches 100.
+  function shiftConfig({ mode = 'day', threshold, reserve = 5, weeklyCeiling = 80, ceilingWaived = false, lookAhead = false, maxUnreadable = 3 }) {
+    const t = threshold ?? (mode === 'away' ? 98 : 90);
+    return { mode, threshold: t, reserve: Math.max(0, Math.min(reserve, HARD_LIMIT - 1 - t)), weeklyCeiling, ceilingWaived, lookAhead, maxUnreadable };
+  }
+
+  // reading: { ok, fiveHour:{pct, resetsAt}, weekly:[pct...] }  (weekly = every weekly window, all-models and per-model)
+  // boundary: 'admission' (start a new ticket) or 'step' (next step of the admitted ticket)
+  // typicalStepCost: largest recent step cost in points, from the ledger (used only with lookAhead)
+  function decide(cfg, reading, boundary, unreadableStreak, typicalStepCost = 0) {
+    if (!reading.ok) {
+      const streak = unreadableStreak + 1;
+      if (streak >= cfg.maxUnreadable) return { verdict: 'end', streak, reason: `usage unreadable ${streak} times in a row: end with a handover` };
+      return { verdict: 'retry', streak, retryInMin: 10, reason: `usage unreadable (${streak}/${cfg.maxUnreadable}): fail closed, retry in 10 min` };
+    }
+    const weekly = Math.max(...reading.weekly);
+    if (!cfg.ceilingWaived && weekly >= cfg.weeklyCeiling)
+      return { verdict: 'end', streak: 0, reason: `weekly ${weekly}% ≥ ceiling ${cfg.weeklyCeiling}%: end with a handover, not a pause` };
+    const limit = boundary === 'admission' ? cfg.threshold : cfg.threshold + cfg.reserve;
+    const pct = reading.fiveHour.pct;
+    if (pct >= limit)
+      return { verdict: 'pause', streak: 0, limit, resumeAt: reading.fiveHour.resetsAt + 3, reason: `5-hour ${pct}% ≥ ${boundary} limit ${limit}%: pause until reset` };
+    if (cfg.lookAhead && pct + typicalStepCost >= HARD_LIMIT)
+      return { verdict: 'pause', streak: 0, limit, resumeAt: reading.fiveHour.resetsAt + 3, reason: `5-hour ${pct}% + a typical step (${typicalStepCost}) would hit 100%: pause until reset` };
+    return { verdict: 'proceed', streak: 0, limit, reason: `5-hour ${pct}% < ${boundary} limit ${limit}%${cfg.ceilingWaived ? ' (weekly ceiling waived)' : `, weekly ${weekly}% < ${cfg.weeklyCeiling}%`}` };
+  }
+
+  // Points used between two readings, attributed to whatever ticket ran in between.
+  // pausedBetween: no shift work happened between the readings (so a reset there just rebaselines).
+  function measure(prev, next, pausedBetween) {
+    if (!prev || !prev.ok || !next.ok) return { points: 0, approx: true, note: 'missing reading' };
+    if (next.fiveHour.resetsAt === prev.fiveHour.resetsAt) return { points: next.fiveHour.pct - prev.fiveHour.pct, approx: false };
+    if (pausedBetween) return { points: 0, approx: false, note: 'window reset during pause' };
+    return { points: next.fiveHour.pct, approx: true, note: 'window reset mid-step: pre-reset part unknown, lower bound only' };
+  }
+
+  return { shiftConfig, decide, measure, HARD_LIMIT };
+})();
+</script>
+
+<script>
+// ===== Throwaway simulation shell around UsageGate =====
+const STEPS = [['Implement', 8], ['Review', 3], ['Fix', 3], ['Verify', 4]];
+const START = 22 * 60; // 22:00
+const fmt = m => { const d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), mm = m % 60; return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}${d ? ' +' + d + 'd' : ''}`; };
+
+let S, changed = new Set();
+
+function init(o = {}) {
+  S = {
+    cfg: UsageGate.shiftConfig(o.cfg || {}),
+    now: START, pct: o.pct ?? 40, resetsAt: START + (o.resetIn ?? 240), weekly: o.weekly ?? 30,
+    status: 'running', queue: ['T1', 'T2', 'T3', 'T4', 'T5', 'T6'], current: null, stepIx: 0,
+    streak: 0, failNext: 0, resumeAt: null, lastReading: null, pausedSinceReading: false,
+    ledger: {}, stepCosts: [], log: [], verdict: null,
+  };
+  log('Shift starts. ' + cfgText());
+}
+function cfgText() { const c = S.cfg; return `${c.mode} shift: threshold ${c.threshold}%, reserve +${c.reserve}, weekly ceiling ${c.ceilingWaived ? 'waived' : c.weeklyCeiling + '%'}${c.lookAhead ? ', look-ahead on' : ''}.`; }
+function log(t) { S.log.unshift(`${fmt(S.now)}  ${t}`); }
+function read() {
+  if (S.failNext > 0) { S.failNext--; return { ok: false }; }
+  return { ok: true, fiveHour: { pct: Math.floor(S.pct), resetsAt: S.resetsAt }, weekly: [Math.floor(S.weekly), Math.floor(S.weekly * 0.7)] };
+}
+function advance(min, cost = 0) { // time passes; a reset may land inside it
+  const end = S.now + min;
+  if (end >= S.resetsAt) {
+    const after = (end - S.resetsAt) / min; S.now = S.resetsAt;
+    S.pct = cost * after; S.resetsAt += 300;
+    log('5-hour window reset.');
+  } else S.pct += cost;
+  S.weekly += cost * 0.1; S.now = end;
+}
+function record(reading) {
+  if (S.current) {
+    const m = UsageGate.measure(S.lastReading, reading, S.pausedSinceReading);
+    const L = S.ledger[S.current];
+    L.points += m.points; L.approx ||= m.approx; if (m.note) L.notes.add(m.note);
+    if (!m.approx && m.points > 0) S.stepCosts.push(m.points);
+  }
+  if (reading.ok) { S.lastReading = reading; S.pausedSinceReading = false; }
+}
+
+function step() {
+  if (S.status !== 'running') { log(`Nothing runs: shift is ${S.status}.`); return; }
+  const boundary = S.current ? 'step' : 'admission';
+  if (!S.current && !S.queue.length) { S.status = 'ended'; log('Queue empty: handover.'); return; }
+  const r = read();
+  record(r);
+  const typical = Math.max(0, ...S.stepCosts.slice(-8));
+  const d = UsageGate.decide(S.cfg, r, boundary, S.streak, typical);
+  S.streak = d.streak; S.verdict = d;
+  log(`Gate (${boundary}): ${d.verdict.toUpperCase()}. ${d.reason}`);
+  if (d.verdict === 'retry') { advance(d.retryInMin); return; }
+  if (d.verdict === 'end') { S.status = 'ended'; log('Shift ends. Handover written.'); return; }
+  if (d.verdict === 'pause') { S.status = 'paused'; S.resumeAt = d.resumeAt; S.pausedSinceReading = true; log(`Paused. One-shot resume scheduled for ${fmt(d.resumeAt)}.`); return; }
+  if (!S.current) { S.current = S.queue.shift(); S.stepIx = 0; S.ledger[S.current] = { points: 0, approx: false, notes: new Set(), done: false }; log(`Admitted ${S.current}.`); }
+  const [name, cost] = STEPS[S.stepIx];
+  advance(25, cost);
+  if (S.pct >= UsageGate.HARD_LIMIT) {
+    S.pct = 100; S.status = 'stuck';
+    log(`${S.current} ${name} hit 100%: Claude Code stops mid-step. No resume was scheduled. This is the failure the gate exists to prevent.`);
+    return;
+  }
+  log(`${S.current}: ${name} done (cost ${cost}).`);
+  S.stepIx++;
+  if (S.stepIx === STEPS.length) { record(read()); S.ledger[S.current].done = true; log(`${S.current} closed.`); S.current = null; }
+}
+
+const actions = {
+  step,
+  wake() {
+    if (S.status !== 'paused') { log('No resume is scheduled.'); return; }
+    S.now = Math.max(S.now, S.resumeAt);
+    while (S.now >= S.resetsAt) { S.pct = 0; S.resetsAt += 300; log('5-hour window reset.'); }
+    S.status = 'running'; S.resumeAt = null; log('Resume fired. Next step re-reads usage before doing anything.');
+  },
+  other() { S.pct = Math.min(100, S.pct + 10); S.weekly += 1; log('Builder used Claude in another session: +10 points (account-wide).'); },
+  unreadable() { S.failNext++; log('The next usage read will fail.'); },
+  waive() { S.cfg = { ...S.cfg, ceilingWaived: true }; if (S.status === 'ended') S.status = 'running'; log('Builder waived the weekly ceiling for this shift (via Remote Control).'); },
+  reset() { init(); },
+};
+
+function act(a) {
+  const before = snapshot();
+  actions[a]();
+  const after = snapshot();
+  changed = new Set(Object.keys(after).filter(k => after[k] !== before[k]));
+  render();
+}
+function snapshot() { return { status: S.status, time: S.now, pct: Math.floor(S.pct), weekly: Math.floor(S.weekly), reset: S.resetsAt, ticket: S.current + ':' + S.stepIx, resume: S.resumeAt }; }
+
+function bar(pct, marks) {
+  return `<div class="bar"><i style="width:${Math.min(100, pct)}%"></i>${marks.map(([p, t]) => `<${t} style="left:${p}%"></${t}>`).join('')}</div>`;
+}
+const C = k => changed.has(k) ? ' class="changed"' : '';
+function render() {
+  const c = S.cfg;
+  document.getElementById('settings').innerHTML = `<dl>
+    <dt>Mode</dt><dd>${c.mode === 'away' ? 'Away (overnight)' : 'Day'}</dd>
+    <dt>Admit new tickets below</dt><dd>${c.threshold}%</dd>
+    <dt>Admitted ticket may continue below</dt><dd>${c.threshold + c.reserve}% (reserve +${c.reserve})</dd>
+    <dt>Weekly ceiling</dt><dd>${c.ceilingWaived ? 'waived for this shift' : c.weeklyCeiling + '%'}</dd>
+    <dt>Look-ahead for next step</dt><dd>${c.lookAhead ? 'on' : 'off'}</dd></dl>`;
+  const cur = S.current ? `${S.current}, next step ${STEPS[S.stepIx][0]}` : 'none (next step is an admission)';
+  document.getElementById('now').innerHTML = `<dl>
+    <dt>Shift</dt><dd${C('status')}><span class="status ${S.status}">${S.status}</span>${S.resumeAt ? ` until ${fmt(S.resumeAt)}` : ''}</dd>
+    <dt>Clock</dt><dd${C('time')}>${fmt(S.now)}</dd>
+    <dt>5-hour used</dt><dd${C('pct')}>${Math.floor(S.pct)}%, resets ${fmt(S.resetsAt)}${bar(S.pct, [[c.threshold, 'b'], [c.threshold + c.reserve, 's']])}</dd>
+    <dt>Weekly used</dt><dd${C('weekly')}>${Math.floor(S.weekly)}%${bar(S.weekly, c.ceilingWaived ? [] : [[c.weeklyCeiling, 's']])}</dd>
+    <dt>Ticket in progress</dt><dd${C('ticket')}>${cur}</dd>
+    <dt>Waiting</dt><dd>${S.queue.join(', ') || 'none'}</dd></dl>`;
+  const v = S.verdict;
+  document.getElementById('verdict').innerHTML = v ? `<div class="verdict"><strong>Last gate decision: ${v.verdict}</strong><br>${v.reason}</div>` : '';
+  const rows = Object.entries(S.ledger).map(([t, L]) => `<tr><td>${t}</td><td>${L.approx ? '≥ ' : ''}${L.points}</td><td>${L.done ? 'closed' : 'in progress'}</td><td>${[...L.notes].join('; ')}</td></tr>`).join('');
+  document.getElementById('ledger').innerHTML = rows ? `<table><tr><th>Ticket</th><th>5-hour points</th><th>State</th><th>Notes</th></tr>${rows}</table>
+    <p class="note">Points are account-wide deltas between readings, so anything else using Claude meanwhile lands on the ticket.</p>` : '<p class="note">No tickets admitted yet.</p>';
+  document.getElementById('log').innerHTML = S.log.map(l => `<div>${l}</div>`).join('');
+}
+
+// ===== Walkthroughs =====
+const run = n => Array(n).fill('step');
+const SCENARIOS = [
+  { name: 'Day: pause and resume', setup: { pct: 55, resetIn: 280 },
+    text: 'Day shift at 90%, reserve +5. Watch T2 finish its last step above 90% (inside the reserve), then T3 refused at admission. The shift pauses, the resume fires after reset, and work continues.',
+    steps: [...run(9), 'wake', 'step'] },
+  { name: 'Away: no room for a step', setup: { pct: 84, resetIn: 280, cfg: { mode: 'away' } },
+    text: 'Away shift at 98%. The reserve is squeezed to +1 so it never reaches 100%. Steps cost several points each, so a step admitted at 98% can still blow through 100%. Watch what happens without look-ahead.',
+    steps: run(4) },
+  { name: 'Away with look-ahead', setup: { pct: 84, resetIn: 280, cfg: { mode: 'away', lookAhead: true } },
+    text: 'Same as before, but the gate also asks whether a typical step (largest recent step cost from the ledger) still fits under 100%. It pauses one step earlier instead of getting stuck.',
+    steps: run(4) },
+  { name: 'Weekly ceiling, then waive', setup: { pct: 20, weekly: 79.5 },
+    text: 'Weekly sits at 79% against an 80% ceiling. After a step pushes it over, the next gate ends the shift with a handover, not a pause. Then the builder waives the ceiling for this shift and it carries on.',
+    steps: ['step', 'step', 'waive', 'step'] },
+  { name: 'Usage unreadable', setup: { pct: 30 },
+    text: 'The usage tool fails to answer. The gate fails closed: no work, retry in 10 minutes. Three failures in a row end the shift.',
+    steps: ['unreadable', 'step', 'step', 'unreadable', 'unreadable', 'unreadable', 'step', 'step', 'step'] },
+  { name: 'Reset lands mid-step', setup: { pct: 70, resetIn: 20 },
+    text: 'The reset is 20 minutes away and a step takes 25. The ledger cannot know how much of that step fell before the reset, so it records a lower bound and says so.',
+    steps: run(3) },
+  { name: 'Builder works alongside', setup: { pct: 40 },
+    text: 'The builder uses Claude in another session while the shift runs. Usage is account-wide, so the ledger charges it to whichever ticket is in progress.',
+    steps: ['step', 'other', 'step', 'step', 'step', 'step'] },
+];
+let tab = 0, at = 0;
+function renderTabs() {
+  document.getElementById('tabs').innerHTML = SCENARIOS.map((s, i) => `<button class="${i === tab ? 'on' : ''}" onclick="pick(${i})">${s.name}</button>`).join('');
+  const s = SCENARIOS[tab];
+  document.getElementById('scenarioText').textContent = s.text;
+  const label = { step: 'Run the next step', wake: 'Resume fires', other: 'Builder uses Claude elsewhere', unreadable: 'Next read fails', waive: 'Waive weekly ceiling' };
+  document.getElementById('steps').innerHTML = s.steps.map((a, i) => `<button ${i !== at ? 'disabled' : ''} class="${i === at ? 'next' : ''}" onclick="walk()">${i + 1}. ${label[a]}</button>`).join('');
+}
+function pick(i) { tab = i; at = 0; init(SCENARIOS[i].setup); changed = new Set(); render(); renderTabs(); }
+function walk() { act(SCENARIOS[tab].steps[at]); at++; renderTabs(); }
+
+pick(0);
+</script>
+</body>
+</html>
