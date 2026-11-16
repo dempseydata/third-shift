@@ -14,3 +14,9 @@ record, and what must therefore never be in it? See `## Visibility` in `CLAUDE.m
 ## How it was built
 The phases as they ran, one paragraph each, with links into `ideation/`, `definition/`,
 `design/` and `docs/adr/`. Reversals told plainly — the record is the point.
+
+- **Parallelism reversed before charting (2026-11-16).** The research settled on 2 tickets in
+  parallel. While charting the map it was cut to serial for version 1. On a subscription the
+  binding limit is usage per 5-hour window, not wall-clock time, so a second agent uses up the
+  window faster without clearly finishing more work. Parallel worktrees were also the riskiest
+  piece. The serial flow comes first; parallel work is a later map.

@@ -67,8 +67,8 @@ multi-vendor review panels.
   `handover`); implementer, reviewer, fixer and verifier stay subagent briefs.
 - **Intake:** `to-tickets` output. GitHub Issues is the standard tracker for factory runs;
   local `.scratch` tickets remain supported serially with the ledger only.
-- **Parallelism:** 2 in the first version, never two tickets where one blocks the other.
-  Burst beyond that is a later map.
+- **Parallelism:** serial in the first version: get the flow working first. Parallel work
+  (2 agents, then burst) is a later map. *Reversed 2026-11-16 while charting; it was 2.*
 - **Usage gate:** in the Claude desktop app, the orchestrator reads plan usage (5-hour and
   weekly percent used, reset times) from the app's built-in usage tool before each admission.
   The weekly limit can veto. A terminal fallback via statusline data is deferred.

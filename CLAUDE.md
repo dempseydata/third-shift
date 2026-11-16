@@ -33,7 +33,7 @@ has run. If a product cannot meet this, it is a private-forever project and star
 skills/<name>/                                 one folder per skill: SKILL.md, references/, scripts/
 cli/                                           only if there is deterministic code
 evals/                                         the eval set for `claude plugin eval`
-docs/ CONTEXT.md                               the record
+docs/ GLOSSARY.md                              the record
 ```
 
 - A skill folder holds the skill's text and what it alone uses. Deterministic work shared by
@@ -55,11 +55,25 @@ definition, don't engage on build without reading the design decisions. `docs/wh
 is the story the README used to tell: why it was built, how, and what was reversed.
 
 ## Stack conventions
-- Domain vocabulary → `CONTEXT.md`. Decision rationale → `docs/adr/`. Reviewability docs
+- Domain vocabulary → `GLOSSARY.md`. Decision rationale → `docs/adr/`. Reviewability docs
   (`architecture`, `flows`, `permissions`, `variables`, …) → `docs/`, from `/document-app`.
-- `diagnosing-bugs` and `improve-codebase-architecture` must read `CONTEXT.md` + `docs/adr/` first.
+- `diagnosing-bugs` and `improve-codebase-architecture` must read `GLOSSARY.md` + `docs/adr/` first.
 
 There is no house DESIGN.md; a product's root `DESIGN.md`, if any, is derived from its shipped UI for Impeccable's drift detection, never a source of truth.
 
 ## Design skills
 Only if the plugin ships a visual surface. `taste-skill:design-taste-frontend` (the `taste-skill@taste-skill` plugin, user scope, nothing copied into the repo) is the taste-skill fallback — it draws candidate directions from its own internal library, not a named-variant pick; `impeccable` fine-tunes only after a direction is chosen.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on this (public) repo, via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles, each label named for its role. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
