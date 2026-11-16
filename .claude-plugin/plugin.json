@@ -1,0 +1,20 @@
+{
+  "name": "third-shift",
+  "version": "0.1.0",
+  "description": "An unattended software factory for Claude Code: it works the agent-ready tickets that Matt Pocock's to-tickets produced, verifies each one, and leaves a handover.",
+  "author": {
+    "name": "Andrew Dempsey",
+    "url": "https://github.com/dempseydata"
+  },
+  "repository": "https://github.com/dempseydata/third-shift",
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "software-factory",
+    "tickets",
+    "unattended"
+  ],
+  "skills": [
+    "./skills/start"
+  ]
+}

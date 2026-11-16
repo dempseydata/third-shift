@@ -1,0 +1,26 @@
+.DS_Store
+node_modules/
+.env*
+*.log
+__pycache__/
+.venv/
+
+# impeccable runtime state (per-machine)
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+
+# Real-data fixtures and derived session data — never committed, even privately
+local-data/
+
+# Tooling output and captures — never tracked in a public repo
+.impeccable/
+.playwright-mcp/
+graphify-out/
+*.png
+!docs/screenshots/*.png
+
+# Claude Code state, project settings and the toolchain inventory: tooling, not product.
+# This template still tracks its .claude/ files so a copy carries them; a product re-inited
+# from it ignores .claude/ from the first commit.
+.claude/
+what-is-installed.md

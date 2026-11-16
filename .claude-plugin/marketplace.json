@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "third-shift",
+  "description": "An unattended software factory for Claude Code: it works the agent-ready tickets that Matt Pocock's to-tickets produced, verifies each one, and leaves a handover.",
+  "owner": {
+    "name": "Andrew Dempsey",
+    "url": "https://github.com/dempseydata"
+  },
+  "plugins": [
+    {
+      "name": "third-shift",
+      "source": "./",
+      "description": "An unattended software factory for Claude Code: it works the agent-ready tickets that Matt Pocock's to-tickets produced, verifies each one, and leaves a handover.",
+      "category": "productivity"
+    }
+  ]
+}
