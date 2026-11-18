@@ -41,7 +41,14 @@ _Avoid_: throttle (reserved for a possible skill name)
 A shift holding all admissions until the 5-hour window resets.
 
 **Resume**:
-The same shift continuing after a pause or an interruption, from its ledger.
+The same session continuing its shift after a pause.
+
+**Revival**:
+A new session taking over a shift whose session died, from its ledger.
+_Avoid_: restart, respawn
+
+**Stall**:
+A shift that keeps stopping without progress; it waits for the builder.
 
 ## Verification
 
