@@ -9,6 +9,9 @@ away, verifies each one, and leaves a handover.
 One unattended run over one spec's tickets, from prescan to handover.
 _Avoid_: night shift, run, job
 
+**Proving shift**:
+The first unattended shift run against a real target project to show version 1 works; it passes or fails against a stated pass condition.
+
 **Prescan**:
 The checks made before a shift starts, which settle whether each ticket carries enough to build from.
 
