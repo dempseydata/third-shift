@@ -28,8 +28,15 @@ A question or limit that stops one ticket until the builder answers it; the shif
 **Ledger**:
 The shift's running record of each ticket's status, decisions, owed findings and nits.
 
+**Shift status**:
+The live account of a shift on its spec issue, which becomes the handover when the shift ends.
+
 **Handover**:
-The report a shift leaves for the builder when it ends.
+The shift status at the shift's end, generated from the ledger and tracker.
+
+**Needs you**:
+A ticket waiting on the builder for any reason: a blocker, a stall, set aside after a crash, a criterion only the builder can run, or human work.
+_Avoid_: using blocker for all of these; a blocker is one kind
 
 ## Usage
 
