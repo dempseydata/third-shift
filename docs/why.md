@@ -20,3 +20,10 @@ The phases as they ran, one paragraph each, with links into `ideation/`, `defini
   binding limit is usage per 5-hour window, not wall-clock time, so a second agent uses up the
   window faster without clearly finishing more work. Parallel worktrees were also the riskiest
   piece. The serial flow comes first; parallel work is a later map.
+
+## Where it is headed
+The intent is to grow from a build step into a release factory: a change that is verified with
+evidence, deployed to a test or staging environment for a human to try, and released with
+documentation written from the shift's own records. Version 1 does only the first of these,
+verification. Deployment for review and release documentation are later maps, and the product
+keeps the name "software factory" until both are on one.
