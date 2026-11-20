@@ -1,0 +1,16 @@
+{
+  "description": "third-shift's hooks; each does nothing unless a shift is armed and this session holds its lease (ADR 0004).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" heartbeat >/dev/null"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -9,17 +9,17 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #21 | closed | e761863 | 3 | 35 tests, 51 s | arm + next, test seam with fake gh |
 | #22 | closed | bbb714b | 2 | 55 tests, 119 s | admit, step, done with commit-pinned evidence; suite past 2× baseline |
 | #23 | closed | 370b4f2 | 1 | 78 tests, 99 s | needs-you, stall, release, note, wait, end; suite cut 118→61 s for old tests |
-| #24 | closed | (this commit) | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
+| #24 | closed | 8c31748 | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
+| #25 | closed | (this commit) | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
 
 ## Owed
-- #25: `arm` does not copy prescan.json and sitting.json into runtime state, though the spec's Records section lists them there; revival will need them (from #21 review).
+- #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
 - #22: ~~`next` checks the branch before reading the ledger~~ — paid in #22.
 - #28: `done` renders the closing comment but neither posts it nor closes the issue; no ticket owns closing the issue — #28 should post the comment and close (from #22 review).
 - #24: ~~gate in admit and step --begin~~ — paid in #24.
 - #23: ~~suite speed~~ — paid in #23 (class fixtures copied per test).
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
-- #25: the suite is 102–104 s, past twice the 51 s baseline. Cut setup: fewer git processes per fixture copy, fewer push round-trips, merge classes sharing a state; target under 90 s (from #24).
-- #25: `pause --until` (cli/shift ~604) parses with `timestamp`, not `zoned`, so a reset time without a timezone can be stored; use `type=zoned` (from #24 review).
+- #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -54,6 +54,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #24: `pause --reason usage|owner`; pause and resume commit to the ledger — ADR? no
 - #24: the gate's pause point is capped at 99% in every mode; while paused the gate answers pause-until — ADR? no (map #6)
 
+- #25: tests run on threads via `load_tests` in tests/__init__.py, one lock per shared fixture; 104 → 26 s — ADR? no
+- #25: a stale `--gen` is logged to `refusals.jsonl` in runtime state (ADR 0002 lists refusals in the ledger; a stale session cannot commit) — ADR? yes (amends ADR 0002)
+- #25: heartbeat on PreToolUse records only its time; a session claims the lease only if its cwd is inside the stored `target`; revive retires the outgoing session id, which can never reclaim — ADR? yes (refines ADR 0004's lease binding)
+- #25: revive refuses unless is-dead; sets work aside on `refs/third-shift/<slug>/set-aside-<gen>` and pushes it; returns the shift to running — ADR? no
+- #25: is-dead never counts a waiting shift or an owner pause as dead; a usage pause is dead only after reset + 15 min (map #10) — ADR? no
+- #25: a ticket in progress across two crashes → Needs you, "set aside after a crash" — ADR? no (map #15)
+
 ## Blocked
 
 ## Nits
@@ -72,3 +79,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #23: refusal messages include temp paths
 - #24: a window reset whose after-reading is ≥ the before-reading goes undetected
 - #24: a single `--weekly` reading is accepted
+- #25: `cli/shift` ~560 `state["target"]` raises KeyError on a parseable state.json with no target
+- #25: malformed hook stdin is refused before the armed check
+- #25: the threaded runner skips setUpClass/module fixtures and ignores failfast and `-b`
+- #25: tests/test_revival.py ~98 comment claims glob order is sorted

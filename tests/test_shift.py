@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,8 @@ SHIFT = ROOT / "cli" / "shift"
 REPO = "acme/widget"
 SLUG = "20-widget-version-1"
 LEDGER = Path("docs/third-shift-ledger") / f"{SLUG}.json"
-TEMPLATES = {}  # fixture name: (folder, base commit); each folder goes when the run ends
+LOCKS = {}  # fixture name: the lock its first test holds while building it
+TEMPLATES = {}  # fixture name: (folder, base commit, folder built in); each folder goes when the run ends
 
 
 def issue(number, state="open"):
@@ -50,60 +52,63 @@ class Target(unittest.TestCase):
         }
         cls = type(self)
         key = cls.__dict__.get("fixture", f"{cls.__module__}.{cls.__qualname__}")  # not a parent's
-        template = TEMPLATES.get(key)
-        if template:
-            shutil.copytree(template[0].name, self.tmp, symlinks=True, dirs_exist_ok=True,
-                            copy_function=shutil.copy)  # copy2's metadata costs 5x
-            self.git("remote", "set-url", "origin", str(self.remote))
-            self.base = template[1]
-        else:
-            self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.tmp)
-            self.git("clone", "-q", str(self.remote), str(self.target), cwd=self.tmp)
-            (self.target / "README.md").write_text("widget\n")
-            self.git("add", ".")
-            self.git("commit", "-qm", "init")
-            self.git("push", "-q", "origin", "HEAD:main")
-            self.base = self.git("rev-parse", "HEAD")
-        self.prescan = {
-            "spec": {"number": 20, "title": "Widget version 1"},
-            "repo": REPO,
-            "base_commit": self.base,
-            "tickets": [
-                {"number": 21, "title": "First", "state": "open",
-                 "labels": ["ready-for-agent"], "blocked_by": [], "criteria": ["It runs"]},
-                {"number": 22, "title": "Second", "state": "open",
-                 "labels": ["ready-for-agent"], "blocked_by": [21], "criteria": ["It flies"]},
-                {"number": 23, "title": "Human", "state": "open",
-                 "labels": ["ready-for-human"], "blocked_by": [], "criteria": ["Signed"]},
-                {"number": 24, "title": "Old", "state": "closed",
-                 "labels": ["ready-for-agent"], "blocked_by": [], "criteria": ["Was done"]},
-                {"number": 25, "title": "Triage", "state": "open",
-                 "labels": ["needs-triage"], "blocked_by": [], "criteria": ["Looks right"]},
-            ],
-            "checks": [{"name": "uv", "ok": True, "detail": ""}],
-            "warnings": ["App default model is not Opus"],
-            "baseline_seconds": 12.5,
-            "proven_commit": self.base,
-        }
-        self.sitting = {
-            "classes": {"25": "human-verified"},
-            "gaps": [{"question": "Which file format?", "answer": "JSON",
-                      "adr": "docs/adr/0009-file-format.md"}],
-            "end_state": "branch",
-            "binding_sources": ["docs/adr/", "closed decision tickets", "#20", "briefs"],
-            "warnings": [],
-        }
-        if not template:
-            self.tracker({21: [], 22: [issue(21)], 23: [], 25: []})
-            self.prepare()
-            for repo in (self.target, self.remote):  # fewer files to copy per test
-                self.git("repack", "-adq", cwd=repo)
-            for sample in self.tmp.rglob("hooks/*.sample"):
-                sample.unlink()
-            keep = tempfile.TemporaryDirectory()
-            shutil.copytree(self.tmp, keep.name, symlinks=True, dirs_exist_ok=True,
-                            copy_function=shutil.copy)
-            TEMPLATES[key] = keep, self.base
+        with LOCKS.setdefault(key, threading.Lock()):  # tests run on threads: one build
+            template = TEMPLATES.get(key)
+            if template:
+                shutil.copytree(template[0].name, self.tmp, symlinks=True, dirs_exist_ok=True,
+                                copy_function=shutil.copy)  # copy2's metadata costs 5x
+                # paths into the new copy (the remote's, the target's), without a git process
+                for f in (self.target / ".git" / "config", *self.home.glob("*/*/state.json")):
+                    f.write_text(f.read_text().replace(template[2], str(self.tmp)))
+                self.base = template[1]
+            else:
+                self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.tmp)
+                self.git("clone", "-q", str(self.remote), str(self.target), cwd=self.tmp)
+                (self.target / "README.md").write_text("widget\n")
+                self.git("add", ".")
+                self.git("commit", "-qm", "init")
+                self.git("push", "-q", "origin", "HEAD:main")
+                self.base = self.git("rev-parse", "HEAD")
+            self.prescan = {
+                "spec": {"number": 20, "title": "Widget version 1"},
+                "repo": REPO,
+                "base_commit": self.base,
+                "tickets": [
+                    {"number": 21, "title": "First", "state": "open",
+                     "labels": ["ready-for-agent"], "blocked_by": [], "criteria": ["It runs"]},
+                    {"number": 22, "title": "Second", "state": "open",
+                     "labels": ["ready-for-agent"], "blocked_by": [21], "criteria": ["It flies"]},
+                    {"number": 23, "title": "Human", "state": "open",
+                     "labels": ["ready-for-human"], "blocked_by": [], "criteria": ["Signed"]},
+                    {"number": 24, "title": "Old", "state": "closed",
+                     "labels": ["ready-for-agent"], "blocked_by": [], "criteria": ["Was done"]},
+                    {"number": 25, "title": "Triage", "state": "open",
+                     "labels": ["needs-triage"], "blocked_by": [], "criteria": ["Looks right"]},
+                ],
+                "checks": [{"name": "uv", "ok": True, "detail": ""}],
+                "warnings": ["App default model is not Opus"],
+                "baseline_seconds": 12.5,
+                "proven_commit": self.base,
+            }
+            self.sitting = {
+                "classes": {"25": "human-verified"},
+                "gaps": [{"question": "Which file format?", "answer": "JSON",
+                          "adr": "docs/adr/0009-file-format.md"}],
+                "end_state": "branch",
+                "binding_sources": ["docs/adr/", "closed decision tickets", "#20", "briefs"],
+                "warnings": [],
+            }
+            if not template:
+                self.tracker({21: [], 22: [issue(21)], 23: [], 25: []})
+                self.prepare()
+                for repo in (self.target, self.remote):  # fewer files to copy per test
+                    self.git("repack", "-adq", cwd=repo)
+                for sample in self.tmp.rglob("hooks/*.sample"):
+                    sample.unlink()
+                keep = tempfile.TemporaryDirectory()
+                shutil.copytree(self.tmp, keep.name, symlinks=True, dirs_exist_ok=True,
+                                copy_function=shutil.copy)
+                TEMPLATES[key] = keep, self.base, str(self.tmp)
 
     def prepare(self):
         """The state every test of the class starts from, built once and copied."""
@@ -122,10 +127,10 @@ class Target(unittest.TestCase):
             api[f"repos/{REPO}/issues/{n}/dependencies/blocked_by"] = blockers
         (self.gh / "fixture.json").write_text(json.dumps({"repo": REPO, "api": api}))
 
-    def shift(self, *args, cwd=None, env=None, uv=False):
+    def shift(self, *args, cwd=None, env=None, uv=False, input=""):
         # the suite's own Python skips uv's start-up; one test runs the ADR 0003 form
         run = ["uv", "run", "--script"] if uv else [sys.executable]
-        p = subprocess.run([*run, str(SHIFT), *args], cwd=cwd or self.target,
+        p = subprocess.run([*run, str(SHIFT), *args], cwd=cwd or self.target, input=input,
                            env=env or self.env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout) if p.stdout.strip() else p.stderr
 
@@ -206,6 +211,9 @@ class Shift(Target):
         code, out = self.arm()
         state = json.loads((self.home / "acme" / "widget" / "state.json").read_text())
         self.assertEqual((state["armed"], state["gen"], state["spec"]), (True, 1, 20))
+        for name in ("prescan", "sitting"):  # spec: Records, on the Mac; revival needs them
+            self.assertEqual(json.loads((self.home / "acme" / "widget" / f"{name}.json").read_text()),
+                             getattr(self, name))
         self.assertEqual(out["gen"], 1)
         self.assertEqual(self.writes(), [])
 

@@ -124,6 +124,7 @@ class AwayGate(Gated):
             ("resume", "--gen", "1"),  # running, not paused
             ("pause", "--gen", "1", "--reason", "lunch", "--until", self.RESET),
             ("pause", "--gen", "1", "--reason", "usage", "--until", "after lunch"),
+            ("pause", "--gen", "1", "--reason", "usage", "--until", "2026-11-20T05:00:00"),
             ("pause", "--gen", "1", "--reason", "usage"),
         ])
         self.assertEqual(self.snapshot(), before)
