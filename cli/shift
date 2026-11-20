@@ -14,6 +14,13 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   step <ticket> --gen N --role R --round K --model M --effort E --before-5h P --before-weekly P
        --after-5h P --after-weekly P --start ISO --end ISO --tokens T --outcome TEXT
   done <ticket> --gen N --comment <file>   file: [{"criterion", "verdict", "evidence_url"}]
+  needs-you <ticket> --gen N --reason blocker|human-verify|human|"set aside after a crash" --why W
+  stall <ticket> --gen N --why W
+  release <ticket> --gen N [--decision D]
+  note decision|owed|nit <ticket> --gen N --text T [--for <later ticket>]   --for only, and
+       always, for owed
+  wait --gen N
+  end --gen N --reason R   applies the sitting's end state, then disarms
 
 prescan.json (written by cli/prescan):
   {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
@@ -50,6 +57,8 @@ CLASS_BY_LABEL = {"ready-for-human": "human", "ready-for-agent": "agent"}
 CLASSES = ("agent", "human-verified", "human")
 ROLES = ("prescan", "implementer", "reviewer", "fixer", "verifier")  # GLOSSARY: Role
 VERDICTS = ("met", "not met", "needs your run")  # ADR 0003
+STATES = ("Backlog", "Ready", "In progress", "Needs you", "Stalled", "Done")  # spec: States
+REASONS = ("blocker", "human-verify", "human", "set aside after a crash")  # spec: needs-you
 
 
 def out(obj, code=0):
@@ -96,12 +105,13 @@ def write_ledger(path, ledger):
         "", "| Ticket | Title | Class | State |", "| --- | --- | --- | --- |", *rows, ""]))
 
 
-def commit_ledger(path, branch, message):
+def commit_ledger(path, branch, message, *also):
     paths = [str(path), str(path.with_suffix(".md"))]
     if run("git", "status", "--porcelain", "--", *paths):
         run("git", "add", *paths)
         run("git", "commit", "-q", "-m", message, "--", *paths)  # only the ledger, never staged work
-    run("git", "push", "-q", "-u", "origin", branch)  # even when unchanged: retries a failed push
+    # even when unchanged: retries a failed push; atomic, so `also` refs move with it or not at all
+    run("git", "push", "-q", "-u", "--atomic", "origin", branch, *also)
 
 
 def arm(a):
@@ -222,13 +232,13 @@ def next_(a):
          **({} if first else {"frontier": "empty"})})
 
 
-def save(path, ledger, message):
+def save(path, ledger, message, *also):
     """Write, commit and push the ledger; on any failure put the files, index and HEAD back."""
     md = path.with_suffix(".md")
     prior = path.read_text(), md.read_text(), run("git", "rev-parse", "HEAD")
     try:
         write_ledger(path, ledger)
-        commit_ledger(path, ledger["opening"]["branch"], message)
+        commit_ledger(path, ledger["opening"]["branch"], message, *also)
     except Exception:  # a refusal writes nothing
         subprocess.run(["git", "reset", "-q", "--soft", prior[2]], capture_output=True)
         subprocess.run(["git", "reset", "-q", "--", str(path), str(md)], capture_output=True)
@@ -325,6 +335,83 @@ def done(a):
           for r in rows)])})
 
 
+def needs_you(a):
+    _, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    t.update(state="Needs you", reason=a.reason, why=a.why)
+    save(path, ledger, f"ledger: #{a.ticket} needs you")
+    out({"ok": True, "ticket": a.ticket, **t})
+
+
+def stall(a):
+    _, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    t.update(state="Stalled", why=a.why)
+    save(path, ledger, f"ledger: #{a.ticket} stalled")
+    out({"ok": True, "ticket": a.ticket, **t})
+
+
+def release(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "Needs you")
+    t.setdefault("released", []).append(  # the question stays beside the builder's answer
+        {"reason": t.pop("reason", None), "why": t.pop("why", None), "decision": a.decision})
+    t["state"] = frontier_state(gh_list(f"repos/{repo}/issues/{a.ticket}/dependencies/blocked_by"))
+    save(path, ledger, f"ledger: #{a.ticket} released")
+    state_file = runtime(repo)  # work is back on the frontier, so waiting is over
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] == "waiting":
+        state_file.write_text(json.dumps({**state, "shift_state": "running"}) + "\n")
+    out({"ok": True, "ticket": a.ticket, **t})
+
+
+def note(a):
+    _, path, ledger = load(a.gen)
+    ticket(ledger, a.ticket, *STATES)
+    if (a.kind == "owed") != (a.for_ is not None):
+        refuse("an owed finding, and only an owed finding, names its later ticket with --for")
+    if a.for_ is not None:
+        ticket(ledger, a.for_, *STATES[:-1])  # Done can carry nothing
+        if a.for_ == a.ticket:
+            refuse(f"#{a.ticket} cannot owe a finding to itself")
+    ledger.setdefault("notes", []).append({"kind": a.kind, "ticket": a.ticket, "text": a.text,
+                                           **({"for": a.for_} if a.for_ else {})})
+    save(path, ledger, f"ledger: #{a.ticket} {a.kind}")
+    out({"ok": True, "note": ledger["notes"][-1]})
+
+
+def wait(a):
+    repo, _, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "running":
+        refuse(f"the shift is {state['shift_state']}, not running")
+    moving = [f"#{n} is {t['state']}" for n, t in ledger["tickets"].items()
+              if t["state"] not in ("Needs you", "Stalled", "Done")]
+    if moving:
+        refuse(f"tickets can still move: {', '.join(moving)}")
+    state_file.write_text(json.dumps({**state, "shift_state": "waiting"}) + "\n")
+    out({"ok": True, "shift_state": "waiting"})
+
+
+def end(a):
+    repo, path, ledger = load(a.gen)
+    o = ledger["opening"]
+    also = []
+    if o["end_state"] == "fast-forward":  # spec: the end state is applied at `end`
+        head = re.search(r"^ref: refs/heads/(\S+)\tHEAD$",
+                         run("git", "ls-remote", "--symref", "origin", "HEAD"), re.M)
+        if not head:
+            refuse("cannot tell the default branch of origin")
+        also = [f"{o['branch']}:refs/heads/{head[1]}"]  # a plain push: refused unless a fast-forward
+    ledger["end"] = {"reason": a.reason, "end_state": o["end_state"]}
+    save(path, ledger, f"ledger: #{o['spec']['number']} ended", *also)
+    state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
+    state_file.write_text(json.dumps({**json.loads(state_file.read_text()), "armed": False,
+                                      "shift_state": "ended"}) + "\n")
+    out({"ok": True, "shift_state": "ended", "end_state": o["end_state"]})
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):  # ADR 0003 keeps exit 2 for a lost lease
         refuse(message)
@@ -343,6 +430,15 @@ def percent(v):
     if not 0 <= int(v) <= 100:
         raise ValueError(v)
     return int(v)
+
+
+def text(v):
+    if not v.strip():
+        raise ValueError(v)
+    return v
+
+
+text.__name__ = "non-blank text"
 
 
 def timestamp(v):
@@ -379,9 +475,30 @@ def main():
     s.add_argument("ticket", type=int)
     s.add_argument("--gen", type=int, required=True)
     s.add_argument("--comment", required=True)
+    for cmd, flags in (("needs-you", ("reason", "why")), ("stall", ("why",)), ("release", ())):
+        s = sub.add_parser(cmd)
+        s.add_argument("ticket", type=int)
+        s.add_argument("--gen", type=int, required=True)
+        for f in flags:
+            s.add_argument(f"--{f}", required=True, type=text, **(
+                {"choices": REASONS} if f == "reason" else {}))
+    s.add_argument("--decision", type=text)
+    s = sub.add_parser("note")
+    s.add_argument("kind", choices=("decision", "owed", "nit"))
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--text", required=True, type=text)
+    s.add_argument("--for", dest="for_", type=int)
+    s = sub.add_parser("wait")
+    s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("end")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--reason", required=True, type=text)
     a = p.parse_args()
     try:
-        {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done}[a.cmd](a)
+        {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,
+         "needs-you": needs_you, "stall": stall, "release": release, "note": note,
+         "wait": wait, "end": end}[a.cmd](a)
     except subprocess.CalledProcessError as e:
         refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
     except Exception as e:  # ADR 0003: one JSON object, never a stack trace

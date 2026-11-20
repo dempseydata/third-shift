@@ -7,11 +7,16 @@ from tests.test_shift import LEDGER, REPO, SLUG, Target
 BRANCH = f"third-shift/{SLUG}"
 
 
-class Tickets(Target):
-    def setUp(self):
-        super().setUp()
-        self.assertEqual(self.arm()[0], 0)
+class Armed(Target):
+    """An armed shift whose ticket #21 has its body on the tracker; helpers, no tests."""
+    armed = True
+    admitted = False  # #21 In progress
+
+    def prepare(self):
+        super().prepare()
         self.issue_body(21, "## What to build\n\nIt.\n\n## Acceptance criteria\n\n- [ ] It runs\n")
+        if self.admitted:
+            self.assertEqual(self.admit()[0], 0)
 
     def issue_body(self, n, body):
         f = self.gh / "fixture.json"
@@ -19,9 +24,13 @@ class Tickets(Target):
         fixture["api"][f"repos/{REPO}/issues/{n}"] = {"number": n, "body": body}
         f.write_text(json.dumps(fixture))
 
+    def runtime(self):
+        return json.loads((self.home / "acme" / "widget" / "state.json").read_text())
+
     def snapshot(self):
         return ((self.target / LEDGER).read_text(), self.git("rev-parse", "HEAD"),
-                self.git("rev-parse", BRANCH, cwd=self.remote), self.git("status", "--porcelain"))
+                self.git("rev-parse", BRANCH, cwd=self.remote), self.git("status", "--porcelain"),
+                self.runtime())
 
     def assert_ledger_commit(self, message):
         self.assertEqual(self.git("log", "-1", "--format=%s"), message)
@@ -50,8 +59,23 @@ class Tickets(Target):
         return self.shift("done", str(n), "--comment", str(self.tmp / "verdicts.json"), "--gen", gen,
                           cwd=cwd)
 
-    # admit
+    STEP = ("--role", "implementer", "--round", "1", "--model", "opus", "--effort", "high",
+            "--before-5h", "40", "--before-weekly", "12", "--after-5h", "47", "--after-weekly", "13",
+            "--start", "2026-11-20T01:00:00+00:00", "--end", "2026-11-20T01:20:00+00:00",
+            "--tokens", "81234", "--outcome", "built")
 
+    def step(self, *args, n=21, gen="1"):
+        return self.shift("step", str(n), "--gen", gen, *(args or self.STEP))
+
+    def side_commit(self):
+        """A pinned link to a commit on a branch the shift branch does not contain."""
+        self.git("checkout", "-q", "-b", "side")
+        url = self.evidence("verify/evidence/side.txt")
+        self.git("checkout", "-q", BRANCH)
+        return url
+
+
+class Tickets(Armed):
     def test_admit_moves_a_ready_ticket_to_in_progress(self):
         code, out = self.admit()
         self.assertEqual(code, 0, out)
@@ -77,17 +101,7 @@ class Tickets(Target):
         for n in (22, 23, 24, 99):  # Backlog, Needs you, Done, not in the shift
             code, out = self.admit(n)
             self.assertEqual(code, 1, (n, out))
-            self.assertEqual(self.snapshot(), before)
-
-    def test_admit_refuses_a_second_ticket_while_one_is_in_progress(self):
-        self.admit()
-        self.issue_body(25, "## Acceptance criteria\n\n- [ ] Looks right\n")
-        before = self.snapshot()
-        code, out = self.admit(25)
-        self.assertEqual(code, 1, out)
-        self.assertIn("#21", out["refused"])
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(self.admit()[0], 1)  # nor twice
 
     def test_a_stale_gen_is_refused_with_stop_and_writes_nothing(self):
         before = self.snapshot()
@@ -112,18 +126,52 @@ class Tickets(Target):
         self.assertEqual(self.admit()[0], 0)
         self.assertEqual(self.git("status", "--porcelain"), "A  work")
 
-    # step
+    def test_step_refuses_a_ticket_not_in_progress_and_bad_fields(self):
+        before = self.snapshot()
+        for n in (21, 22, 23, 24):  # Ready, Backlog, Needs you, Done
+            self.assertEqual(self.step(n=n)[0], 1, n)
+        self.assertEqual(self.snapshot(), before)
+        self.admit()
+        before = self.snapshot()
+        bad = {"--role": "orchestrator", "--before-5h": "101", "--tokens": "-1",
+               "--start": "last night", "--round": "0"}
+        for flag, value in bad.items():
+            args = list(self.STEP)
+            args[args.index(flag) + 1] = value
+            code, out = self.step(*args)
+            self.assertEqual(code, 1, (flag, out))
+        self.assertEqual(self.snapshot(), before)
 
-    STEP = ("--role", "implementer", "--round", "1", "--model", "opus", "--effort", "high",
-            "--before-5h", "40", "--before-weekly", "12", "--after-5h", "47", "--after-weekly", "13",
-            "--start", "2026-11-20T01:00:00+00:00", "--end", "2026-11-20T01:20:00+00:00",
-            "--tokens", "81234", "--outcome", "built")
+    def test_done_refuses_a_ticket_not_in_progress(self):
+        url = self.evidence()
+        before = self.snapshot()
+        for n in (21, 22, 23, 24):  # Ready, Backlog, Needs you, Done
+            code, out = self.done([{"criterion": "It runs", "verdict": "met",
+                                    "evidence_url": url}], n=n)
+            self.assertEqual(code, 1, (n, out))
+        self.assertEqual(self.snapshot(), before)
 
-    def step(self, *args, n=21, gen="1"):
-        return self.shift("step", str(n), "--gen", gen, *(args or self.STEP))
+    def test_next_off_the_branch_without_a_ledger_names_the_branch(self):
+        self.git("checkout", "-q", "main")
+        code, out = self.shift("next", "--gen", "1")
+        self.assertEqual(code, 1)
+        self.assertIn(f"not on the shift branch {BRANCH}", out["refused"])
+
+
+class Building(Armed):
+    """step and done on #21 In progress."""
+    admitted = True
+
+    def test_admit_refuses_a_second_ticket_while_one_is_in_progress(self):
+        self.issue_body(25, "## Acceptance criteria\n\n- [ ] Looks right\n")
+        before = self.snapshot()
+        code, out = self.admit(25)
+        self.assertEqual(code, 1, out)
+        self.assertIn("#21", out["refused"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.admit()[0], 1)  # nor twice
 
     def test_step_writes_one_record_per_spawn(self):
-        self.admit()
         code, out = self.step()
         self.assertEqual(code, 0, out)
         self.assertEqual(self.ledger()["steps"], [{
@@ -135,34 +183,14 @@ class Tickets(Target):
         self.assertEqual(self.step()[0], 0)
         self.assertEqual(len(self.ledger()["steps"]), 2)
 
-    def test_step_refuses_a_ticket_not_in_progress_and_bad_fields(self):
-        before = self.snapshot()
-        for n in (21, 22, 23, 24):  # Ready, Backlog, Needs you, Done
-            self.assertEqual(self.step(n=n)[0], 1, n)
-            self.assertEqual(self.snapshot(), before)
-        self.admit()
-        before = self.snapshot()
-        bad = {"--role": "orchestrator", "--before-5h": "101", "--tokens": "-1",
-               "--start": "last night", "--round": "0"}
-        for flag, value in bad.items():
-            args = list(self.STEP)
-            args[args.index(flag) + 1] = value
-            code, out = self.step(*args)
-            self.assertEqual(code, 1, (flag, out))
-            self.assertEqual(self.snapshot(), before)
-
     def test_step_refuses_an_end_before_its_start(self):
-        self.admit()
         before = self.snapshot()
         args = list(self.STEP)
         args[args.index("--end") + 1] = "2026-11-20T00:59:00+00:00"
         self.assertEqual(self.step(*args)[0], 1)
         self.assertEqual(self.snapshot(), before)
 
-    # done
-
     def test_done_closes_a_ticket_with_evidence_for_every_criterion(self):
-        self.admit()
         url = self.evidence()
         code, out = self.done([{"criterion": "It runs", "verdict": "met", "evidence_url": url}])
         self.assertEqual(code, 0, out)
@@ -173,7 +201,6 @@ class Tickets(Target):
         self.assert_ledger_commit("ledger: #21 done")
 
     def test_a_needs_your_run_verdict_sends_the_ticket_to_needs_you(self):
-        self.admit()
         url = self.evidence()
         code, out = self.done([{"criterion": "It runs", "verdict": "needs your run",
                                 "evidence_url": url}])
@@ -184,7 +211,6 @@ class Tickets(Target):
         self.assert_ledger_commit("ledger: #21 needs you")
 
     def test_done_refuses_without_a_verdict_and_pinned_evidence_for_every_criterion(self):
-        self.admit()
         url = self.evidence()
         row = {"criterion": "It runs", "verdict": "met", "evidence_url": url}
         sha = url.split("/")[6]
@@ -216,10 +242,9 @@ class Tickets(Target):
         for why, rows in cases.items():
             code, out = self.done(rows)
             self.assertEqual(code, 1, (why, out))
-            self.assertEqual(self.snapshot(), before, why)
+        self.assertEqual(self.snapshot(), before)
 
     def test_done_from_a_subfolder_refuses_a_path_that_git_would_resolve_against_it(self):
-        self.admit()
         url = self.evidence()
         sub = self.target / "verify" / "evidence"
         before = self.snapshot()
@@ -229,45 +254,19 @@ class Tickets(Target):
             code, out = self.done([{"criterion": "It runs", "verdict": "met", "evidence_url": bad}],
                                   cwd=sub)
             self.assertEqual(code, 1, (why, out))
-            self.assertEqual(self.snapshot(), before, why)
+        self.assertEqual(self.snapshot(), before)
         code, out = self.done([{"criterion": "It runs", "verdict": "met", "evidence_url": url}],
                               cwd=sub)
         self.assertEqual(code, 0, out)
 
-    def side_commit(self):
-        """A pinned link to a commit on a branch the shift branch does not contain."""
-        self.git("checkout", "-q", "-b", "side")
-        url = self.evidence("verify/evidence/side.txt")
-        self.git("checkout", "-q", BRANCH)
-        return url
-
     def test_done_accepts_a_line_anchor_on_the_evidence_link(self):
-        self.admit()
         url = self.evidence() + "#L1-L2"
         code, out = self.done([{"criterion": "It runs", "verdict": "met", "evidence_url": url}])
         self.assertEqual(code, 0, out)
 
-    def test_done_refuses_a_ticket_not_in_progress(self):
-        url = self.evidence()
-        before = self.snapshot()
-        for n in (21, 22, 23, 24):  # Ready, Backlog, Needs you, Done
-            code, out = self.done([{"criterion": "It runs", "verdict": "met",
-                                    "evidence_url": url}], n=n)
-            self.assertEqual(code, 1, (n, out))
-            self.assertEqual(self.snapshot(), before)
 
-    # the owed item from #21's review
-
-    def test_next_off_the_branch_without_a_ledger_names_the_branch(self):
-        self.git("checkout", "-q", "main")
-        code, out = self.shift("next", "--gen", "1")
-        self.assertEqual(code, 1)
-        self.assertIn(f"not on the shift branch {BRANCH}", out["refused"])
-
-
-class NoCriteria(Target):
-    issue_body, snapshot, admit, done = (Tickets.issue_body, Tickets.snapshot, Tickets.admit,
-                                         Tickets.done)
+class NoCriteria(Armed):
+    armed = False  # the test arms with its own prescan
 
     def test_done_refuses_a_ticket_with_no_frozen_criteria(self):
         self.prescan["tickets"][0]["criteria"] = []

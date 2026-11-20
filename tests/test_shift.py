@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +21,12 @@ def issue(number, state="open"):
 
 
 class Target(unittest.TestCase):
-    """A temp target repo, its bare remote, runtime folder and fake gh; no tests."""
+    """A temp target repo, its bare remote, runtime folder and fake gh; no tests.
+
+    The first test of each class builds the fixture (and runs `prepare`); the rest copy it,
+    which skips the costly git set-up and arm."""
+    armed = False
+
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -38,13 +44,21 @@ class Target(unittest.TestCase):
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
         }
-        self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.tmp)
-        self.git("clone", "-q", str(self.remote), str(self.target), cwd=self.tmp)
-        (self.target / "README.md").write_text("widget\n")
-        self.git("add", ".")
-        self.git("commit", "-qm", "init")
-        self.git("push", "-q", "origin", "HEAD:main")
-        self.base = self.git("rev-parse", "HEAD")
+        cls = type(self)
+        template = cls.__dict__.get("template")  # never a parent class's
+        if template:
+            shutil.copytree(template, self.tmp, symlinks=True, dirs_exist_ok=True,
+                            copy_function=shutil.copy)  # copy2's metadata costs 5x
+            self.git("remote", "set-url", "origin", str(self.remote))
+            self.base = cls.base
+        else:
+            self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.tmp)
+            self.git("clone", "-q", str(self.remote), str(self.target), cwd=self.tmp)
+            (self.target / "README.md").write_text("widget\n")
+            self.git("add", ".")
+            self.git("commit", "-qm", "init")
+            self.git("push", "-q", "origin", "HEAD:main")
+            self.base = self.git("rev-parse", "HEAD")
         self.prescan = {
             "spec": {"number": 20, "title": "Widget version 1"},
             "repo": REPO,
@@ -74,7 +88,19 @@ class Target(unittest.TestCase):
             "binding_sources": ["docs/adr/", "closed decision tickets", "#20", "briefs"],
             "warnings": [],
         }
-        self.tracker({21: [], 22: [issue(21)], 23: [], 25: []})
+        if not template:
+            self.tracker({21: [], 22: [issue(21)], 23: [], 25: []})
+            self.prepare()
+            keep = tempfile.TemporaryDirectory()
+            cls.addClassCleanup(keep.cleanup)
+            shutil.copytree(self.tmp, keep.name, symlinks=True, dirs_exist_ok=True,
+                            copy_function=shutil.copy)
+            cls.template, cls.base = keep.name, self.base
+
+    def prepare(self):
+        """The state every test of the class starts from, built once and copied."""
+        if self.armed:
+            self.assertEqual(self.arm()[0], 0)
 
     def git(self, *args, cwd=None):
         return subprocess.run(["git", *args], cwd=cwd or self.target, env=self.env,
@@ -88,8 +114,10 @@ class Target(unittest.TestCase):
             api[f"repos/{REPO}/issues/{n}/dependencies/blocked_by"] = blockers
         (self.gh / "fixture.json").write_text(json.dumps({"repo": REPO, "api": api}))
 
-    def shift(self, *args, cwd=None, env=None):
-        p = subprocess.run(["uv", "run", "--script", str(SHIFT), *args], cwd=cwd or self.target,
+    def shift(self, *args, cwd=None, env=None, uv=False):
+        # the suite's own Python skips uv's start-up; one test runs the ADR 0003 form
+        run = ["uv", "run", "--script"] if uv else [sys.executable]
+        p = subprocess.run([*run, str(SHIFT), *args], cwd=cwd or self.target,
                            env=env or self.env, capture_output=True, text=True)
         return p.returncode, json.loads(p.stdout) if p.stdout.strip() else p.stderr
 
@@ -309,6 +337,11 @@ class Shift(Target):
         self.assertTrue((self.target / LEDGER).exists())
         self.assertFalse((sub / "docs").exists())
 
+    def test_the_script_runs_as_a_uv_script(self):
+        code, out = self.shift("bogus", uv=True)
+        self.assertEqual(code, 1)
+        self.assertIn("refused", out)
+
     def test_usage_errors_are_refused_as_one_json_object(self):
         for args in ((), ("bogus",), ("arm", "--prescan", "p", "--sitting", "s", "--mode", "night"),
                      ("next",)):
@@ -333,8 +366,25 @@ class Shift(Target):
 
     # next
 
+    def test_next_reports_a_missing_gh_as_one_json_object(self):
+        bin_ = self.tmp / "nogh"
+        bin_.mkdir()
+        (bin_ / "uv").symlink_to(shutil.which("uv"))
+        (bin_ / "git").symlink_to(shutil.which("git"))
+        code, out = self.shift("next", "--gen", "1",
+                               env={**self.env, "PATH": f"{bin_}{os.pathsep}/usr/bin:/bin"})
+        self.assertEqual(code, 1)
+        self.assertIn("refused", out)
+
+    def test_next_refuses_without_an_armed_shift(self):
+        code, _ = self.shift("next", "--gen", "1")
+        self.assertEqual(code, 1)
+
+
+class Next(Target):
+    armed = True
+
     def test_next_commits_and_pushes_a_changed_ledger(self):
-        self.arm()
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
         self.assertEqual(self.shift("next", "--gen", "1")[0], 0)
         self.assertEqual(self.git("status", "--porcelain"), "")
@@ -346,28 +396,15 @@ class Shift(Target):
                          self.git("rev-parse", branch, cwd=self.remote))
 
     def test_next_leaves_history_alone_when_nothing_changed(self):
-        self.arm()
         self.shift("next", "--gen", "1")
         self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 armed")
 
     def test_next_runs_from_a_subfolder(self):
-        self.arm()
         sub = self.target / "docs"
         code, out = self.shift("next", "--gen", "1", cwd=sub)
         self.assertEqual((code, out["ticket"]["number"]), (0, 21))
 
-    def test_next_reports_a_missing_gh_as_one_json_object(self):
-        bin_ = self.tmp / "nogh"
-        bin_.mkdir()
-        (bin_ / "uv").symlink_to(shutil.which("uv"))
-        (bin_ / "git").symlink_to(shutil.which("git"))
-        code, out = self.shift("next", "--gen", "1",
-                               env={**self.env, "PATH": f"{bin_}{os.pathsep}/usr/bin:/bin"})
-        self.assertEqual(code, 1)
-        self.assertIn("refused", out)
-
     def test_next_refuses_off_the_shift_branch(self):
-        self.arm()
         self.git("checkout", "-q", "-b", "other")
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
         code, out = self.shift("next", "--gen", "1")
@@ -378,7 +415,6 @@ class Shift(Target):
         self.assertNotIn("other", self.git("branch", "-a", cwd=self.remote))
 
     def test_next_pushes_a_frontier_commit_whose_push_failed_before(self):
-        self.arm()
         hook = self.remote / "hooks" / "pre-receive"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
@@ -391,13 +427,11 @@ class Shift(Target):
                          self.git("rev-parse", branch, cwd=self.remote))
 
     def test_next_returns_the_first_frontier_ticket(self):
-        self.arm()
         code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]["number"]), (0, 21))
         self.assertEqual(self.writes(), [])
 
     def test_next_sets_ready_from_native_blocking_only(self):
-        self.arm()
         self.tracker({21: [], 22: [issue(21, "closed")], 25: [issue(99)]}, closed=[21])
         code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]["number"]), (0, 22))
@@ -406,24 +440,18 @@ class Shift(Target):
                                   "24": "Done", "25": "Backlog"})
 
     def test_next_reports_an_empty_frontier(self):
-        self.arm()
         self.tracker({22: [issue(99)]}, closed=[21, 25])
         code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]), (0, None))
         self.assertEqual(out["frontier"], "empty")
 
     def test_next_refuses_a_stale_gen_with_stop_and_writes_nothing(self):
-        self.arm()
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
         code, out = self.shift("next", "--gen", "0")
         self.assertEqual(code, 2, out)
         self.assertTrue(out["stop"])
         self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 armed")
         self.assertEqual(self.git("status", "--porcelain"), "")
-
-    def test_next_refuses_without_an_armed_shift(self):
-        code, _ = self.shift("next", "--gen", "1")
-        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":
