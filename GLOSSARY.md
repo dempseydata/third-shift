@@ -38,8 +38,11 @@ The live account of a shift on its spec issue, which becomes the handover when t
 The shift status at the shift's end, generated from the ledger and tracker.
 
 **Needs you**:
-A ticket waiting on the builder for any reason: a blocker, a stall, set aside after a crash, a criterion only the builder can run, or human work.
+A ticket that can't continue without the builder's input: a blocker, set aside after a crash, a criterion only the builder can run, or human work.
 _Avoid_: using blocker for all of these; a blocker is one kind
+
+**Stall**:
+A ticket that kept stopping without progress and was set aside; the shift carries on with the rest.
 
 ## Usage
 
@@ -57,8 +60,8 @@ The same session continuing its shift after a pause.
 A new session taking over a shift whose session died, from its ledger.
 _Avoid_: restart, respawn
 
-**Stall**:
-A shift that keeps stopping without progress; it waits for the builder.
+**Lease**:
+The claim on a shift held by the one session allowed to write its records; a revival takes it over, and a session without it stops.
 
 ## Verification
 
