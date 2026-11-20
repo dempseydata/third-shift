@@ -11,7 +11,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #23 | closed | 370b4f2 | 1 | 78 tests, 99 s | needs-you, stall, release, note, wait, end; suite cut 118→61 s for old tests |
 | #24 | closed | 8c31748 | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
 | #25 | closed | ed40762 | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
-| #26 | closed | (this commit) | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
+| #26 | closed | 728efb1 | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
+| #27 | open (human-verified) | (this commit) | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -22,6 +23,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
 - #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
+- #37: the guard refuses paths outside the repo, `/tmp` included, so the `done --comment` file (and any scratch file the loop writes) must live inside the repo in a path no commit takes, e.g. under `.git/` (from #27 review).
+- #31, #35: ADR 0006's single allow/deny rules file in `cli/` does not exist yet; the guard needed none. Whichever of #31/#35 lands first creates it (from #27).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -70,6 +73,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #26: the gate's "end" answer is recorded in runtime state; revive clears it — ADR? no
 - #26: Backlog tickets whose blockers are all Done count as work left; stall refs `stalled-<n>-<k>` — ADR? no
 
+- #27: a push passes only if it names a remote and every destination is `third-shift/*`; bare `git push`, HEAD and tag pushes are refused — ADR? yes (stricter than the spec's "no default-branch push")
+- #27: all three safety hooks log refusals to the ledger's `refused` list in a `ledger: refused` commit, falling back to refusals.jsonl off-branch or when the push fails; commands are redacted (key shapes, secret args) and cut to 500 chars — ADR? no (ADR 0002)
+- #27: the guard fails closed on an unreadable command and on an unreadable state.json for the session's own repo; malformed hook stdin fails open — ADR? yes (the guard's safety posture)
+- #27: only `uv run --script <plugin>/cli/shift` is exempt from the outside-the-repo rule; the rest of the plugin root is refused; a quoted word is a path if it starts with `~` or it or its parent exists — ADR? no
+- #27: every state.json write is atomic (per-process temp + os.replace) — ADR? no
+- #27: stop-check does not count a refusal as progress — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -94,3 +104,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #25: tests/test_revival.py ~98 comment claims glob order is sorted
 - #26: the `armed` and `released` stall-row breaks have no committed test
 - #26: the Stop hook's timeout behaviour not checked
+- #27: with a corrupt state.json and `gh repo view` failing (no origin, offline), Bash is denied in that repo for every session; match `git remote -v` URLs instead
+- #27: a deleted hook cwd with a corrupt state fails open (exit 1) even inside the owning repo; catch OSError
+- #27: passes: `python -c`, `base64 | sh`, aliases, a symlink already in the repo, writes to `.git/config`, `gh workflow run`
+- #27: `grep "/api"` is now refused (fails safe)
+- #27: PermissionDenied's exact payload and the guard's hook-timeout behaviour not checked

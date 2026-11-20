@@ -31,6 +31,15 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
        the ticket in progress (work set aside on refs/third-shift/<spec-slug>/stalled-<n>-<k>);
        three stalled tickets in a row end the shift. Any failure exits 1, which Claude Code
        treats as a non-blocking error: the gate fails open, and the watchman is the backstop
+  guard       the PreToolUse hook on Bash: denies, while this session holds an armed shift's
+       lease, pushes other than to third-shift/* branches; force, delete and mirror pushes;
+       branch deletes; changes to remotes; destructive gh commands; paths outside the repo; and
+       any command it cannot read. Prints the hook's decision, {} to pass
+  deny-prompt the PermissionRequest hook: denies every prompt in the shift's session, but
+       AskUserQuestion
+  refused     the PermissionDenied hook. Every refusal (guard, deny-prompt, refused) is logged to
+       the ledger's "refused" list in a `ledger: refused` commit, or, off the shift branch or if
+       the push fails, to refusals.jsonl in runtime state
   is-dead     for the watchman: {"dead": bool, "why"}
   revive      takes over a dead shift: raises the lease, sets uncommitted work aside on
        refs/third-shift/<spec-slug>/set-aside-<gen>, restarts the ticket from its last commit
@@ -110,6 +119,17 @@ def run(*cmd, env=None):
 
 def home():
     return Path(os.environ.get("THIRD_SHIFT_HOME", Path.home() / ".third-shift"))
+
+
+def write_atomic(path, text):
+    """A whole file or none: a reader never sees half a write. One temp per process, as hooks
+    run in parallel."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def runtime(repo):
@@ -215,7 +235,7 @@ def arm(a):
         state_file.parent.mkdir(parents=True, exist_ok=True)
         for f, content in copies.items():  # spec: Records, kept on the Mac
             f.write_text(content)
-        state_file.write_text(json.dumps({
+        write_atomic(state_file, json.dumps({
             "armed": True, "gen": 1, "spec": spec["number"], "ledger": str(rel),
             "shift_state": "running", "since": now(),
             "target": top}) + "\n")  # the heartbeat's claim checks the folder
@@ -225,7 +245,7 @@ def arm(a):
                         str(path), str(md)], capture_output=True)
         for f, content in prior.items():
             if content is not None:
-                f.write_text(content)
+                write_atomic(f, content)
         for f in (path, md, *(f for f, c in prior.items() if c is None)):
             with suppress(OSError):
                 f.unlink()
@@ -326,7 +346,7 @@ def gate(a, repo, ledger, role, limit):
     state = json.loads(state_file.read_text())
 
     def end(why):  # kept, even at a refused admission: stop-check lets the session stop
-        state_file.write_text(json.dumps({**json.loads(state_file.read_text()),
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()),
                                           "gate_end": why}) + "\n")
         return {"gate": "end", "reason": why}
     if state["shift_state"] == "paused":
@@ -334,7 +354,7 @@ def gate(a, repo, ledger, role, limit):
                 "reason": f"the shift is paused until {state['until']}"}
     failures = state.get("unreadable", 0) + 1 if a.unreadable else 0
     if failures != state.get("unreadable", 0):
-        state_file.write_text(json.dumps({**state, "unreadable": failures}) + "\n")
+        write_atomic(state_file, json.dumps({**state, "unreadable": failures}) + "\n")
     if a.unreadable:
         if failures >= UNREADABLE_LIMIT:
             return end(f"usage unreadable {failures} times in a row")
@@ -471,7 +491,7 @@ def release(a):
     state_file = runtime(repo)  # work is back on the frontier, so waiting is over
     state = json.loads(state_file.read_text())
     if state["shift_state"] == "waiting":
-        state_file.write_text(json.dumps({**state, "shift_state": "running"}) + "\n")
+        write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
     out({"ok": True, "ticket": a.ticket, **t})
 
 
@@ -500,7 +520,7 @@ def wait(a):
               if t["state"] not in ("Needs you", "Stalled", "Done")]
     if moving:
         refuse(f"tickets can still move: {', '.join(moving)}")
-    state_file.write_text(json.dumps({**state, "shift_state": "waiting"}) + "\n")
+    write_atomic(state_file, json.dumps({**state, "shift_state": "waiting"}) + "\n")
     out({"ok": True, "shift_state": "waiting"})
 
 
@@ -512,7 +532,7 @@ def pause(a):
         refuse(f"the shift is {state['shift_state']}, not running")
     ledger.setdefault("pauses", []).append({"reason": a.reason, "until": a.until, "at": now()})
     save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} paused")
-    state_file.write_text(json.dumps({**state, "shift_state": "paused", "until": a.until,
+    write_atomic(state_file, json.dumps({**state, "shift_state": "paused", "until": a.until,
                                       "pause": a.reason}) + "\n")
     out({"ok": True, "shift_state": "paused", "until": a.until})
 
@@ -527,7 +547,7 @@ def resume(a):
     save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} resumed")
     state.pop("until", None)
     state.pop("pause", None)
-    state_file.write_text(json.dumps({**state, "shift_state": "running"}) + "\n")
+    write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
     out({"ok": True, "shift_state": "running"})
 
 
@@ -552,18 +572,20 @@ def finish(repo, path, ledger, reason, **extra):
     ledger["end"] = {"reason": reason, "end_state": o["end_state"]}
     save(path, ledger, f"ledger: #{o['spec']['number']} ended", *also)
     state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
-    state_file.write_text(json.dumps({**json.loads(state_file.read_text()), "armed": False,
+    write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "armed": False,
                                       "shift_state": "ended"}) + "\n")
     return {"ok": True, **extra, "shift_state": "ended", "end_state": o["end_state"]}
 
 
-def held(hook):
+def held(hook, strict=False):
     """The state file of the armed shift whose lease this hook's session holds or can claim."""
     session, cwd = hook.get("session_id"), Path(hook.get("cwd") or os.getcwd()).resolve()
     for state_file in home().glob("*/*/state.json") if session else ():
         try:
             state = json.loads(state_file.read_text())
         except ValueError:
+            if strict and owns(cwd, state_file):  # the guard fails closed in that repo
+                raise
             continue  # an unreadable state refuses its own repo, not every other one
         if (not state.get("armed") or state.get("session_id", session) != session
                 or session in state.get("retired", ())):  # a revived-away session never reclaims
@@ -572,9 +594,22 @@ def held(hook):
             target = Path(state["target"])
             if target != cwd and target not in cwd.parents:
                 continue
-            state_file.write_text(json.dumps({**state, "session_id": session}) + "\n")
+            write_atomic(state_file, json.dumps({**state, "session_id": session}) + "\n")
         return state_file
     return None
+
+
+def owns(cwd, state_file):
+    """Whether cwd is in the repo a state file is for, named as arm names it (gh's owner/repo).
+    Inside a repo gh cannot name, the guard cannot tell, so it counts as owned."""
+    if subprocess.run(["git", "rev-parse"], cwd=cwd, capture_output=True).returncode:
+        return False  # not a repo: no shift's
+    p = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=cwd,
+                       capture_output=True, text=True)
+    try:
+        return json.loads(p.stdout)["nameWithOwner"] == "/".join(state_file.parts[-3:-1])
+    except (ValueError, KeyError):
+        return True
 
 
 def heartbeat(a):
@@ -582,12 +617,7 @@ def heartbeat(a):
     state_file = held(json.loads(sys.stdin.read() or "{}"))
     if state_file:
         # atomic: is-dead never reads half a beat; one temp per process, as hooks run in parallel
-        tmp = state_file.with_name(f"heartbeat.{os.getpid()}.tmp")
-        try:
-            tmp.write_text(json.dumps({"at": now()}) + "\n")
-            os.replace(tmp, tmp.with_name("heartbeat"))
-        finally:
-            tmp.unlink(missing_ok=True)
+        write_atomic(state_file.with_name("heartbeat"), json.dumps({"at": now()}) + "\n")
         out({"ok": True, "heartbeat": now()})
     out({"ok": True, "heartbeat": None})
 
@@ -640,7 +670,7 @@ def stop_check(a):
         count = 0  # recorded, so the count never keeps rising
     left = remaining(ledger)
     if left:
-        state_file.write_text(json.dumps({**json.loads(state_file.read_text()), "stops": {
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "stops": {
             "ledger": fingerprint(path), "count": count}}) + "\n")
     if not left or idle:
         out({})
@@ -649,8 +679,409 @@ def stop_check(a):
          "frontier is empty."})
 
 
-def fingerprint(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def guard(a):
+    """The guard's entry point (PreToolUse on Bash): denies an irreversible command while this
+    session holds an armed shift's lease. A command it cannot read is denied (fails closed)."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    try:
+        state_file = held(hook, strict=True)
+    except ValueError:
+        out(deny(f"a shift's state in {home()} cannot be read"))
+    if not state_file:
+        out({})
+    try:
+        target = json.loads(state_file.read_text())["target"]
+        why = unsafe(hook["tool_input"]["command"], hook.get("cwd") or target, target)
+    except Exception as e:  # anything the guard cannot read is refused while armed
+        why = f"the guard cannot read this command ({type(e).__name__}: {e})"
+    if not why:
+        out({})
+    record(state_file, "guard", hook, why)
+    out(deny(why))
+
+
+def deny(why):
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": f"third-shift guard: {why}. A shift may push only to "
+        "third-shift/* branches and act only inside the repo; do it another way, or record "
+        "the need with needs-you."}}
+
+
+def deny_prompt(a):
+    """The PermissionRequest hook: no one answers prompts in a shift's session, so each is
+    denied; AskUserQuestion passes, as the sittings ask through it (map #17)."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    state_file = held(hook)
+    if not state_file or hook.get("tool_name") == "AskUserQuestion":
+        out({})
+    record(state_file, "prompt", hook, "a permission prompt in an unattended shift")
+    out({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {
+        "behavior": "deny", "message": "third-shift: no one is here to answer a permission "
+        "prompt during a shift. Do it another way, or record the need with needs-you."}}})
+
+
+def refused(a):
+    """The PermissionDenied hook (auto mode denied a call): logs it; the denial stands."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    state_file = held(hook)
+    if state_file:
+        record(state_file, "auto", hook, hook.get("reason") or "denied by auto mode")
+    out({})
+
+
+def record(state_file, by, hook, why):
+    """Logs a refused action to the ledger (ADR 0002); off the shift branch, or if the commit
+    or push fails, to refusals.jsonl in runtime state, so a refusal is never lost."""
+    state, ti = json.loads(state_file.read_text()), hook.get("tool_input") or {}
+    private = str(Path.home())  # the ledger may be public: no machine paths
+    entry = {"at": now(), "by": by, "tool": hook.get("tool_name"),
+             "input": redact(str(ti.get("command") or ti.get("file_path") or json.dumps(ti)))
+             .replace(private, "~"), "why": redact(why).replace(private, "~")}
+    try:
+        os.chdir(state["target"])
+        path = Path(state["target"]) / state["ledger"]
+        ledger = json.loads(path.read_text())
+        if run("git", "rev-parse", "--abbrev-ref", "HEAD") != ledger["opening"]["branch"]:
+            raise RuntimeError("off the shift branch")
+        entry["ticket"] = next((int(n) for n, t in ledger["tickets"].items()
+                                if t["state"] == "In progress"), None)
+        ledger.setdefault("refused", []).append(entry)
+        save(path, ledger, "ledger: refused")
+    except Exception:
+        with state_file.with_name("refusals.jsonl").open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+SECRETS = re.compile(  # key shapes (.githooks/denylist.txt), then a secret after its prefix
+    r"(?i)sk-[\w-]{8,}|gh[pousr]_\w{20,}|github_pat_\w{20,}|AKIA[0-9A-Z]{16}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
+    r"|(://[^/\s:@]+:)[^@\s]+(?=@)"
+    r"|(bearer\s+|(?<!\S)--?(?:token|password|passwd|secret|api[-_]?key|p)[ =]"
+    r"|(?<!\S)-p(?=\S)"
+    r"|\b\w*(?:password|passwd|token|secret|api_?key)\w*[=:] ?)\S+")
+
+
+def redact(text, limit=500):
+    """A refusal as the public ledger may show it: secrets masked, then cut to a sane length."""
+    text = SECRETS.sub(lambda m: (m[1] or m[2] or "") + "[redacted]", text)
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+
+# The guard's reading of a shell command. shortcut: code run by an interpreter or a script
+# (python -c, make) is read only where a string in it reads as a shell command, and a command
+# named by a variable behind a wrapper (env $g) is not seen; the guard is one layer of several.
+SEPARATORS = (";;", "&&", "||", "|&", ";", "&", "|", "(", ")", "\n")
+REDIRECTS = ("<<<", "<<-", "<<", ">>", ">&", "<&", "&>", ">|", "<", ">")
+KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "eval"}
+GIT_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+GIT_CONFIG = re.compile(r"(?i)(remote|url|alias|push|branch)\.|core\.hookspath")
+PUSH_BAD = ("--force", "--force-with-lease", "--force-if-includes", "--delete", "--mirror",
+            "--all", "--branches", "--prune", "--tags", "--follow-tags")
+PUSH_VALUE = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+SHIFT_REF = re.compile(r"(?:[^:+\s][^:\s]*:)?(?:refs/heads/)?third-shift/[\w./-]+")
+GH_BAD = re.compile(r"delete|merge|archive|rename|sync|transfer")
+GH_API_VALUE = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header",
+                "--input", "-q", "--jq", "-t", "--template", "--cache", "-p", "--preview",
+                "--hostname"}
+GH_API_RISKY = re.compile(r"git/refs|/merges?\b|/contents/|/protection|/transfer|/rename"
+                          r"|^/?repos/[^/]+/[^/]+/?$")
+GH_MUTATION = re.compile(r"(?is)mutation.*(delete|remove|merge|archive|transfer|updateRef"
+                         r"|updateRepository|createCommitOnBranch)")
+DEVICES = re.compile(r"/dev/(null|stdin|stdout|stderr|tty|fd/\d+)")
+
+
+def lex(s):
+    """A shell command as words (text, quoted) and operator strings, plus the text of every
+    $(..) and `..` in it; raises on anything it cannot read. A substitution leaves `$` in its
+    word, which marks the word as unknown, as a variable does."""
+    toks, subs, docs, word, quoted, i = [], [], [], None, False, 0
+
+    def sub(i):  # the substitution starting at i: its text and the index after it
+        if s[i] == "`":
+            j = s.index("`", i + 1)
+            return s[i + 1:j], j + 1
+        depth = 0
+        for j in range(i + 1, len(s)):
+            depth += {"(": 1, ")": -1}.get(s[j], 0)
+            if not depth:
+                return s[i + 2:j], j + 1
+        raise ValueError("an unclosed $(")
+
+    def end():
+        nonlocal word, quoted
+        if word is not None:
+            if toks and toks[-1] in ("<<", "<<-"):
+                docs.append((word, quoted, toks[-1] == "<<-"))
+            toks.append((word, quoted))
+        word, quoted = None, False
+
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            word = (word or "") + s[i + 1:i + 2].replace("\n", "")
+            i += 2
+        elif c == "'":
+            j = s.index("'", i + 1)
+            word, quoted, i = (word or "") + s[i + 1:j], True, j + 1
+        elif c == '"':
+            j, part = i + 1, ""
+            while s[j] != '"':  # IndexError when unclosed
+                if s[j] == "\\" and s[j + 1] in '$`"\\\n':
+                    part, j = part + s[j + 1].replace("\n", ""), j + 2
+                elif s[j] == "`" or s.startswith("$(", j):
+                    inner, j = sub(j)
+                    subs.append(inner)
+                    part += "$"
+                else:
+                    part, j = part + s[j], j + 1
+            word, quoted, i = (word or "") + part, True, j + 1
+        elif c == "`" or s.startswith("$(", i):
+            inner, i = sub(i)
+            subs.append(inner)
+            word = (word or "") + "$"
+        elif c == "#" and word is None:
+            i = s.find("\n", i) % (len(s) + 1)  # to the newline, or the end
+        elif c in " \t\r":
+            end()
+            i += 1
+        else:
+            op = next((o for o in REDIRECTS + SEPARATORS if s.startswith(o, i)), None)
+            if not op:
+                word, i = (word or "") + c, i + 1
+                continue
+            if op[0] in "<>&" and word and word.isdigit() and not quoted:
+                word = None  # a file descriptor: 2>&1
+            end()
+            toks.append(op)
+            i += len(op)
+            while op == "\n" and docs:  # here-document bodies start on the next line
+                delim, quoted_delim, tabs = docs.pop(0)
+                body = []
+                while True:
+                    if i >= len(s):
+                        raise ValueError(f"a here-document without its {delim} line")
+                    nl = s.find("\n", i) % (len(s) + 1)
+                    line, i = s[i:nl], nl + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+                    body.append(line)
+                if not quoted_delim and re.search(r"\$\(|`", "\n".join(body)):
+                    raise ValueError("a substitution in a here-document")
+    end()
+    return toks, subs
+
+
+def unsafe(command, cwd, target, full=True):
+    """Why the guard refuses a command, or None. `full` also checks paths; a string inside a
+    command is read only for git and gh, and only as far as it lexes."""
+    roots = [os.path.realpath(target)]  # the plugin is outside: a shift never edits its guard
+    toks, subs = lex(command)
+    for inner in subs:
+        why = unsafe(inner, cwd, target)
+        if why:
+            return why
+    commands, words, redirect = [], [], False
+    for t in toks + [";"]:
+        if isinstance(t, tuple):
+            if redirect:  # a redirect's target is a path, not an argument
+                if full and outside(t, cwd, roots):
+                    return f"a path outside the repo: {t[0]}"
+            else:
+                words.append(t)
+            redirect = False
+        elif t in REDIRECTS:
+            redirect = True
+        else:
+            redirect = False
+            if words:
+                commands.append(words)
+                words = []
+    for words in commands:
+        ws = [w for w, _ in words]
+        k = 0
+        while k < len(ws) and (ws[k] in KEYWORDS or re.match(r"[A-Za-z_]\w*=", ws[k])):
+            k += 1
+        name = ws[k].rsplit("/", 1)[-1] if k < len(ws) else ""
+        if "$" in name:
+            return f"a command named by a variable or substitution: {ws[k]}"
+        for w in ws:
+            if re.match(r"GIT_CONFIG\w*=", w):
+                return f"git configuration set from the environment: {w}"
+        if full:
+            if name in ("cd", "pushd") and ws[k + 1:k + 2] in ([], ["-"]):
+                return "a change of folder outside the repo"
+            for j, w in enumerate(words):
+                if j == k + 3 and ws[k:k + 3] == ["uv", "run", "--script"] and shift_script(w, cwd):
+                    continue  # the state script, run from the plugin
+                if outside(w, cwd, roots):
+                    return f"a path outside the repo: {w[0]}"
+        for i, w in enumerate(ws):
+            base = w.rsplit("/", 1)[-1]
+            rest = [x for x in ws[i + 1:] if x != ";"]  # find -exec .. \;
+            why = git(rest, target) if base == "git" else gh(rest) if base == "gh" else None
+            if why:
+                return why
+            if re.search(r"[\s;&|]", w):  # a string that may be a command: sh -c, python -c
+                try:
+                    why = unsafe(w, cwd, target, full=full and name in SHELLS)
+                except Exception:  # not shell, or not only: read it with the quoting stripped
+                    if name in SHELLS:
+                        raise
+                    try:
+                        why = unsafe(re.sub(r"[\\'\"`$()]", " ", w), cwd, target, full=False)
+                    except Exception:
+                        why = None  # text, not a command
+                if why:
+                    return why
+    return None
+
+
+def shift_script(word, cwd):
+    p = re.sub(r"^\$(CLAUDE_PLUGIN_ROOT|\{CLAUDE_PLUGIN_ROOT\})(?=/|$)", str(PLUGIN), word[0])
+    roots = [PLUGIN, *([os.environ["CLAUDE_PLUGIN_ROOT"]] if os.environ.get("CLAUDE_PLUGIN_ROOT")
+                       else [])]
+    return os.path.realpath(os.path.join(cwd, p)) in {
+        os.path.realpath(os.path.join(r, "cli", "shift")) for r in roots}
+
+
+def outside(word, cwd, roots):
+    """True for a word naming a path outside the repo. A quoted word counts if it starts with ~
+    or it or its folder exists, so a quoted pattern ("/api/users") is not taken for a path."""
+    w, quoted = word
+    for p in {w, w.partition("=")[2]} - {""}:
+        p = re.sub(r"^\$(HOME|\{HOME\})(?=/|$)", "~", p)
+        p = re.sub(r"^\$(CLAUDE_PLUGIN_ROOT|\{CLAUDE_PLUGIN_ROOT\})(?=/|$)", str(PLUGIN), p)
+        tilde = p.startswith("~")
+        if tilde:
+            if not re.match(r"~(/|$)", p):
+                return True  # ~user
+            p = str(Path.home()) + p[1:]
+        if not (p.startswith("/") or ".." in p.split("/")):
+            continue
+        real = os.path.realpath(os.path.join(cwd, p))
+        if DEVICES.fullmatch(real) or any(real == r or real.startswith(r + os.sep) for r in roots):
+            continue
+        if not quoted or tilde or os.path.exists(real) or os.path.exists(os.path.dirname(real)):
+            return True
+    return False
+
+
+def git(args, target):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        key = args[i + 1] if a in ("-c", "--config-env") and i + 1 < len(args) else (
+            a.partition("=")[2] if a.startswith("--config-env=") else "")
+        if GIT_CONFIG.match(key):
+            return f"git configuration that changes pushes or remotes: {a} {key}"
+        i += 2 if a in GIT_VALUE else 1
+    if i >= len(args):
+        return None
+    sub, rest = args[i], args[i + 1:]
+    if subprocess.run(["git", "config", "--get", f"alias.{sub}"], cwd=target,
+                      capture_output=True).returncode == 0:
+        return f"a git alias, which the guard cannot follow: git {sub}"
+    short = "".join(a[1:] for a in rest if re.match(r"-[^-]", a))
+    long = [a.split("=")[0] for a in rest if a.startswith("--") and len(a.split("=")[0]) > 3]
+    if sub == "push":
+        return push(rest)
+    if sub == "branch" and (set(short) & {"d", "D"} or any("--delete".startswith(a) for a in long)):
+        return "a branch delete"
+    if sub == "update-ref" and {"-d", "--stdin"} & set(rest) or sub == "send-pack":
+        return f"a ref change outside the guard's reading: git {sub}"
+    if sub == "remote" and next((a for a in rest if not a.startswith("-")), None) not in (
+            None, "show", "get-url"):
+        return "a change to the remotes"
+    if sub == "config":
+        pos = [a for a in rest if not a.startswith("-")]
+        writes = {"--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
+                  "--remove-section"} & set(rest) or pos[:1] in (
+            ["set"], ["unset"], ["rename-section"], ["remove-section"])
+        reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"} & set(
+            rest) or pos[:1] in (["get"], ["list"])
+        if {"-e", "--edit"} & set(rest) or pos[:1] == ["edit"] or any(
+                GIT_CONFIG.match(a) for a in pos) and (writes or len(pos) > 1 and not reads):
+            return "a change to git configuration for pushes or remotes"
+    return None
+
+
+def push(args):
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            pos += args[i:]
+            break
+        if a.startswith("--"):
+            name = a.split("=")[0]
+            if len(name) > 3 and any(b.startswith(name) for b in PUSH_BAD):  # git takes prefixes
+                return f"a {a} push"
+            i += name in PUSH_VALUE and "=" not in a
+        elif a.startswith("-") and len(a) > 1:
+            if set(a[1:]) & {"f", "d"}:
+                return f"a {a} push (force or delete)"
+            i += a == "-o"
+        else:
+            pos.append(a)
+    if len(pos) < 2:
+        return "a push that names no branch: push as `git push origin third-shift/<slug>`"
+    for r in pos[1:]:
+        if not SHIFT_REF.fullmatch(r) or ".." in r:
+            return f"a push of {r}, which is not a third-shift/* branch"
+    return None
+
+
+def gh(args):
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("-R", "--repo", "--hostname"):
+            i += 1
+        elif not a.startswith("-"):
+            pos.append(a)
+    group, action, more = (pos + [""] * 3)[:3]
+    if group == "api":
+        method, fields, endpoint, i, j = None, [], None, 0, args.index("api") + 1
+        rest = args[j:]
+        while i < len(rest):
+            a = rest[i]
+            i += 1
+            if a in GH_API_VALUE:
+                v = rest[i] if i < len(rest) else ""
+                i += 1
+                if a in ("-X", "--method"):
+                    method = v
+                elif a in ("-f", "-F", "--field", "--raw-field", "--input"):
+                    fields.append(v)
+            elif a.startswith("-X") or a.startswith("--method="):
+                method = a.removeprefix("-X").removeprefix("--method=")
+            elif a.startswith(("-f", "-F")) or a.startswith(("--field=", "--raw-field=")):
+                fields.append(a.split("=", 1)[-1])
+            elif not a.startswith("-") and endpoint is None:
+                endpoint = a
+        method = (method or ("POST" if fields else "GET")).upper()
+        if method == "DELETE" or method != "GET" and (
+                GH_API_RISKY.search(endpoint or "") or endpoint == "graphql" and any(
+                    GH_MUTATION.search(f) for f in fields)):
+            return f"a destructive GitHub API call: {method} {endpoint}"
+        return None
+    if any(a.split("=")[0] == "--delete-branch" for a in args):
+        return f"a branch delete: gh {group} {action} --delete-branch"
+    if GH_BAD.search(action) or group == "repo" and (
+            action in ("edit", "set-default") or action in ("deploy-key", "autolink")
+            and GH_BAD.search(more)) or group == "alias" and action in ("set", "import"):
+        return f"a destructive gh command: gh {group} {action}"
+    return None
+
+
+def fingerprint(path):  # a refusal is not progress
+    ledger = json.loads(path.read_text())
+    ledger.pop("refused", None)
+    return hashlib.sha256(json.dumps(ledger, sort_keys=True).encode()).hexdigest()
 
 
 def remaining(ledger):
@@ -738,7 +1169,7 @@ def revive(a):
     save_aside(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} revived", ref)
     retired = [*state.get("retired", []), *([state["session_id"]] if "session_id" in state else [])]
     state = {k: v for k, v in state.items() if k not in ("session_id", "until", "pause", "gate_end")}
-    state_file.write_text(json.dumps({**state, "gen": gen, "revivals": revivals, "since": now(),
+    write_atomic(state_file, json.dumps({**state, "gen": gen, "revivals": revivals, "since": now(),
                                       "retired": retired,  # the next hook, never these, claims
                                       "shift_state": "running"}) + "\n")
     result = {"gen": gen, "revivals": revivals, "ticket": n and int(n),
@@ -849,14 +1280,16 @@ def main():
     s = sub.add_parser("end")
     s.add_argument("--gen", type=int, required=True)
     s.add_argument("--reason", required=True, type=text)
-    for cmd in ("heartbeat", "stop-check", "is-dead", "revive"):
+    for cmd in ("heartbeat", "stop-check", "is-dead", "revive", "guard", "deny-prompt",
+                "refused"):
         sub.add_parser(cmd)
     a = p.parse_args()
     try:
         {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,
          "needs-you": needs_you, "stall": stall, "release": release, "note": note,
          "pause": pause, "resume": resume, "wait": wait, "end": end, "heartbeat": heartbeat,
-         "stop-check": stop_check, "is-dead": is_dead, "revive": revive}[a.cmd](a)
+         "stop-check": stop_check, "is-dead": is_dead, "revive": revive, "guard": guard,
+         "deny-prompt": deny_prompt, "refused": refused}[a.cmd](a)
     except subprocess.CalledProcessError as e:
         refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
     except Exception as e:  # ADR 0003: one JSON object, never a stack trace

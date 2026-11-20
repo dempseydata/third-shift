@@ -10,6 +10,15 @@
             "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" heartbeat >/dev/null"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" guard"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -18,6 +27,28 @@
           {
             "type": "command",
             "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" stop-check"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" deny-prompt"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" refused"
           }
         ]
       }
