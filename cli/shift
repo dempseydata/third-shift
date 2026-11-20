@@ -1,0 +1,231 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The state script (ADR 0003): the only writer of a shift's ledger and runtime state.
+
+Run from the target repo's folder as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" <cmd>`.
+Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease lost.
+
+  arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none]
+  next
+
+prescan.json (written by cli/prescan):
+  {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
+   "tickets": [{"number", "title", "state": "open"|"closed", "labels": [..],
+                "blocked_by": [issue numbers, native links only], "criteria": [text, ..]}],
+   "checks": [{"name", "ok": bool, "detail"}], "warnings": [text, ..],
+   "baseline_seconds": float, "proven_commit": sha}
+
+sitting.json (written by the start skill's decision sitting):
+  {"classes": {"<ticket>": "agent"|"human-verified"|"human"},  overrides the triage label
+   "gaps": [{"question", "answer", "adr": path}], "end_state": "branch"|"fast-forward",
+   "binding_sources": [in precedence order], "warnings": [text, ..]}
+
+Runtime state lives in $THIRD_SHIFT_HOME (default ~/.third-shift)/<owner>/<repo>/state.json.
+The ledger is docs/third-shift-ledger/<spec-slug>.json (and .md) in the target, on the
+branch third-shift/<spec-slug>, where spec-slug is "<number>-<title, slugified>".
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from contextlib import suppress
+from pathlib import Path
+
+PLUGIN = Path(__file__).resolve().parent.parent
+THRESHOLD = {"day": 90, "away": 98}
+RESERVE = 5
+CEILING = 80
+CLASS_BY_LABEL = {"ready-for-human": "human", "ready-for-agent": "agent"}
+CLASSES = ("agent", "human-verified", "human")
+
+
+def out(obj, code=0):
+    print(json.dumps(obj))
+    sys.exit(code)
+
+
+def refuse(why):
+    out({"ok": False, "refused": why}, 1)
+
+
+def run(*cmd):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def runtime(repo):
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or {".", ".."} & set(repo.split("/")):
+        refuse(f"not an owner/repo name: {repo}")
+    home = Path(os.environ.get("THIRD_SHIFT_HOME", Path.home() / ".third-shift"))
+    return home / repo / "state.json"
+
+
+def ledger_path(spec):
+    slug = re.sub(r"[^a-z0-9]+", "-", spec["title"].lower()).strip("-")
+    return Path("docs/third-shift-ledger") / (f"{spec['number']}-{slug}".rstrip("-") + ".json")
+
+
+def frontier_state(blockers):
+    return "Backlog" if any(b["state"] == "open" for b in blockers) else "Ready"
+
+
+def write_ledger(path, ledger):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ledger, indent=2) + "\n")
+    o = ledger["opening"]
+    rows = [f"| #{t['number']} | {t['title']} | {t['class']} | {ledger['tickets'][str(t['number'])]['state']} |"
+            for t in o["tickets"]]
+    path.with_suffix(".md").write_text("\n".join([
+        f"# Ledger: #{o['spec']['number']} {o['spec']['title']}", "",
+        "Generated from the JSON beside it by the state script; do not edit.", "",
+        f"Branch `{o['branch']}` from `{o['base_commit']}` · third-shift {o['version']} · "
+        f"{o['mode']} mode, threshold {o['threshold']}%, ceiling "
+        f"{'waived' if o['ceiling'] is None else str(o['ceiling']) + '%'} · end state {o['end_state']}",
+        "", "| Ticket | Title | Class | State |", "| --- | --- | --- | --- |", *rows, ""]))
+
+
+def commit_ledger(path, branch, message):
+    paths = [str(path), str(path.with_suffix(".md"))]
+    if run("git", "status", "--porcelain", "--", *paths):
+        run("git", "add", *paths)
+        run("git", "commit", "-q", "-m", message, "--", *paths)  # only the ledger, never staged work
+    run("git", "push", "-q", "-u", "origin", branch)  # even when unchanged: retries a failed push
+
+
+def arm(a):
+    prescan = json.loads(Path(a.prescan).read_text())
+    sitting = json.loads(Path(a.sitting).read_text())
+    state_file = runtime(prescan["repo"])
+    if state_file.exists() and json.loads(state_file.read_text()).get("armed"):
+        refuse(f"a shift is already armed for {prescan['repo']}")
+    ceiling = None if a.ceiling == "none" else int(a.ceiling)
+    if ceiling is not None and ceiling < 0:
+        refuse(f"the ceiling must be 0 or more, or none: {a.ceiling}")
+    failed = [c["name"] for c in prescan["checks"] if not c["ok"]]
+    if failed:
+        refuse(f"checks failed: {', '.join(failed)}")
+    unanswered = [g["question"] for g in sitting["gaps"] if not (g.get("answer") or "").strip()]
+    if unanswered:
+        refuse(f"gaps unanswered: {'; '.join(unanswered)}")
+    tickets = []
+    done = {t["number"] for t in prescan["tickets"] if t["state"] == "closed"}
+    for t in prescan["tickets"]:
+        cls = sitting["classes"].get(str(t["number"])) or next(
+            (CLASS_BY_LABEL[l] for l in t["labels"] if l in CLASS_BY_LABEL), None)
+        if not cls:
+            refuse(f"ticket #{t['number']} is unclassed")
+        if cls not in CLASSES:
+            refuse(f"ticket #{t['number']} has an unknown class: {cls}")
+        # a blocker outside the ticket set counts as open until `next` reads its state
+        state = ("Done" if t["state"] == "closed" else "Needs you" if cls == "human"
+                 else frontier_state([{"state": "open"} for b in t["blocked_by"] if b not in done]))
+        tickets.append({"number": t["number"], "title": t["title"], "class": cls,
+                        "starting_state": state, "blocked_by": t["blocked_by"],
+                        "criteria": t["criteria"]})
+    if run("git", "rev-parse", "HEAD") != prescan["base_commit"]:
+        refuse("the base commit has moved since the prescan")
+
+    spec = prescan["spec"]
+    rel = ledger_path(spec)
+    path = Path(run("git", "rev-parse", "--show-toplevel")) / rel
+    branch = f"third-shift/{path.stem}"
+    ledger = {
+        "opening": {
+            "spec": spec, "repo": prescan["repo"], "branch": branch,
+            "base_commit": prescan["base_commit"],
+            "version": json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
+            "mode": a.mode, "threshold": THRESHOLD[a.mode], "reserve": RESERVE,
+            "ceiling": ceiling, "end_state": sitting["end_state"],
+            "baseline_seconds": prescan["baseline_seconds"],
+            "proven_commit": prescan["proven_commit"],
+            "binding_sources": sitting["binding_sources"], "gaps": sitting["gaps"],
+            "warnings": prescan["warnings"] + sitting["warnings"],
+            "tickets": tickets,
+        },
+        "tickets": {str(t["number"]): {"state": t["starting_state"]} for t in tickets},
+    }
+    prior = state_file.read_text() if state_file.exists() else None  # rollback restores it
+    was_on = run("git", "branch", "--show-current") or prescan["base_commit"]
+    run("git", "checkout", "-q", "-b", branch, prescan["base_commit"])
+    md = path.with_suffix(".md")
+    try:
+        write_ledger(path, ledger)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps({"armed": True, "gen": 1, "spec": spec["number"],
+                                          "ledger": str(rel), "shift_state": "running"}) + "\n")
+        commit_ledger(path, branch, f"ledger: #{spec['number']} armed")  # the push is last
+    except Exception:  # leave nothing behind, so arm can run again
+        subprocess.run(["git", "rm", "-q", "-f", "--cached", "--ignore-unmatch", "--",
+                        str(path), str(md)], capture_output=True)
+        if prior is not None:
+            state_file.write_text(prior)
+        for f in (path, md) if prior is not None else (state_file, path, md):
+            with suppress(OSError):
+                f.unlink()
+        for d in (state_file.parent, path.parent):
+            with suppress(OSError):
+                os.removedirs(d)  # only the folders left empty
+        subprocess.run(["git", "checkout", "-q", was_on], capture_output=True)
+        subprocess.run(["git", "branch", "-q", "-D", branch], capture_output=True)
+        raise
+    out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel)})
+
+
+def gh_list(path):
+    return [json.loads(l) for l in run("gh", "api", "--paginate", path, "--jq", ".[]").splitlines()]
+
+
+def next_(a):
+    repo = json.loads(run("gh", "repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
+    state = runtime(repo)
+    if not state.exists() or not json.loads(state.read_text())["armed"]:
+        refuse(f"no shift is armed for {repo}")
+    path = Path(run("git", "rev-parse", "--show-toplevel")) / json.loads(state.read_text())["ledger"]
+    ledger = json.loads(path.read_text())
+    spec = ledger["opening"]["spec"]["number"]
+    if run("git", "branch", "--show-current") != ledger["opening"]["branch"]:
+        refuse(f"not on the shift branch {ledger['opening']['branch']}")
+    closed = {i["number"] for i in gh_list(f"repos/{repo}/issues/{spec}/sub_issues")
+              if i["state"] == "closed"}
+    for n, t in ledger["tickets"].items():
+        if int(n) in closed:
+            t["state"] = "Done"
+        elif t["state"] in ("Backlog", "Ready"):
+            t["state"] = frontier_state(gh_list(f"repos/{repo}/issues/{n}/dependencies/blocked_by"))
+    write_ledger(path, ledger)
+    commit_ledger(path, ledger["opening"]["branch"], f"ledger: #{spec} frontier")
+    first = next((t for t in ledger["opening"]["tickets"]
+                  if ledger["tickets"][str(t["number"])]["state"] == "Ready"), None)
+    out({"ok": True, "ticket": first and {"number": first["number"], "title": first["title"]},
+         **({} if first else {"frontier": "empty"})})
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):  # ADR 0003 keeps exit 2 for a lost lease
+        refuse(message)
+
+
+def main():
+    p = Parser(prog="shift")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("arm")
+    s.add_argument("--prescan", required=True)
+    s.add_argument("--sitting", required=True)
+    s.add_argument("--mode", required=True, choices=["day", "away"])
+    s.add_argument("--ceiling", default=str(CEILING))
+    sub.add_parser("next")
+    a = p.parse_args()
+    try:
+        {"arm": arm, "next": next_}[a.cmd](a)
+    except subprocess.CalledProcessError as e:
+        refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
+    except Exception as e:  # ADR 0003: one JSON object, never a stack trace
+        refuse(f"{type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    main()
