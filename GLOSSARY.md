@@ -25,6 +25,13 @@ The tickets a shift may start next: open, unblocked, and not human work.
 The moment the shift starts work on a ticket.
 _Avoid_: dispatch, pickup
 
+**Role**:
+The part a subagent plays in a shift: prescan, implementer, reviewer, fixer or verifier. The orchestrator is the shift's own session, not a role.
+
+**Step**:
+One subagent's work in one role on one ticket; the unit the usage gate checks between and the ledger costs.
+_Avoid_: turn, call
+
 **Blocker**:
 A question or limit that stops one ticket until the builder answers it; the shift carries on with the rest.
 
