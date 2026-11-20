@@ -19,7 +19,8 @@ def issue(number, state="open"):
     return {"number": number, "state": state, "title": f"Ticket {number}"}
 
 
-class Shift(unittest.TestCase):
+class Target(unittest.TestCase):
+    """A temp target repo, its bare remote, runtime folder and fake gh; no tests."""
     def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -105,6 +106,8 @@ class Shift(unittest.TestCase):
     def ledger(self):
         return json.loads((self.target / LEDGER).read_text())
 
+
+class Shift(Target):
     # arm
 
     def test_arm_writes_the_opening_entry(self):
@@ -308,7 +311,7 @@ class Shift(unittest.TestCase):
 
     def test_usage_errors_are_refused_as_one_json_object(self):
         for args in ((), ("bogus",), ("arm", "--prescan", "p", "--sitting", "s", "--mode", "night"),
-                     ("next", "--gen", "3")):
+                     ("next",)):
             code, out = self.shift(*args)
             self.assertEqual(code, 1, args)
             self.assertIn("refused", out)
@@ -333,7 +336,7 @@ class Shift(unittest.TestCase):
     def test_next_commits_and_pushes_a_changed_ledger(self):
         self.arm()
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
-        self.assertEqual(self.shift("next")[0], 0)
+        self.assertEqual(self.shift("next", "--gen", "1")[0], 0)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 frontier")
         files = self.git("show", "--name-only", "--format=", "HEAD").splitlines()
@@ -344,13 +347,13 @@ class Shift(unittest.TestCase):
 
     def test_next_leaves_history_alone_when_nothing_changed(self):
         self.arm()
-        self.shift("next")
+        self.shift("next", "--gen", "1")
         self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 armed")
 
     def test_next_runs_from_a_subfolder(self):
         self.arm()
         sub = self.target / "docs"
-        code, out = self.shift("next", cwd=sub)
+        code, out = self.shift("next", "--gen", "1", cwd=sub)
         self.assertEqual((code, out["ticket"]["number"]), (0, 21))
 
     def test_next_reports_a_missing_gh_as_one_json_object(self):
@@ -358,7 +361,8 @@ class Shift(unittest.TestCase):
         bin_.mkdir()
         (bin_ / "uv").symlink_to(shutil.which("uv"))
         (bin_ / "git").symlink_to(shutil.which("git"))
-        code, out = self.shift("next", env={**self.env, "PATH": f"{bin_}{os.pathsep}/usr/bin:/bin"})
+        code, out = self.shift("next", "--gen", "1",
+                               env={**self.env, "PATH": f"{bin_}{os.pathsep}/usr/bin:/bin"})
         self.assertEqual(code, 1)
         self.assertIn("refused", out)
 
@@ -366,7 +370,7 @@ class Shift(unittest.TestCase):
         self.arm()
         self.git("checkout", "-q", "-b", "other")
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
-        code, out = self.shift("next")
+        code, out = self.shift("next", "--gen", "1")
         self.assertEqual(code, 1)
         self.assertIn("refused", out)
         self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 armed")
@@ -379,23 +383,23 @@ class Shift(unittest.TestCase):
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
         self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
-        self.assertEqual(self.shift("next")[0], 1)
+        self.assertEqual(self.shift("next", "--gen", "1")[0], 1)
         hook.unlink()
-        self.assertEqual(self.shift("next")[0], 0)
+        self.assertEqual(self.shift("next", "--gen", "1")[0], 0)
         branch = f"third-shift/{SLUG}"
         self.assertEqual(self.git("rev-parse", branch),
                          self.git("rev-parse", branch, cwd=self.remote))
 
     def test_next_returns_the_first_frontier_ticket(self):
         self.arm()
-        code, out = self.shift("next")
+        code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]["number"]), (0, 21))
         self.assertEqual(self.writes(), [])
 
     def test_next_sets_ready_from_native_blocking_only(self):
         self.arm()
         self.tracker({21: [], 22: [issue(21, "closed")], 25: [issue(99)]}, closed=[21])
-        code, out = self.shift("next")
+        code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]["number"]), (0, 22))
         states = {n: t["state"] for n, t in self.ledger()["tickets"].items()}
         self.assertEqual(states, {"21": "Done", "22": "Ready", "23": "Needs you",
@@ -404,12 +408,21 @@ class Shift(unittest.TestCase):
     def test_next_reports_an_empty_frontier(self):
         self.arm()
         self.tracker({22: [issue(99)]}, closed=[21, 25])
-        code, out = self.shift("next")
+        code, out = self.shift("next", "--gen", "1")
         self.assertEqual((code, out["ticket"]), (0, None))
         self.assertEqual(out["frontier"], "empty")
 
+    def test_next_refuses_a_stale_gen_with_stop_and_writes_nothing(self):
+        self.arm()
+        self.tracker({21: [], 22: [issue(21, "closed")], 25: []}, closed=[21])
+        code, out = self.shift("next", "--gen", "0")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(out["stop"])
+        self.assertEqual(self.git("log", "-1", "--format=%s"), "ledger: #20 armed")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_next_refuses_without_an_armed_shift(self):
-        code, _ = self.shift("next")
+        code, _ = self.shift("next", "--gen", "1")
         self.assertEqual(code, 1)
 
 

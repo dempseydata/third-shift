@@ -9,7 +9,11 @@ Run from the target repo's folder as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli
 Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease lost.
 
   arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none]
-  next
+  next --gen N
+  admit <ticket> --gen N
+  step <ticket> --gen N --role R --round K --model M --effort E --before-5h P --before-weekly P
+       --after-5h P --after-weekly P --start ISO --end ISO --tokens T --outcome TEXT
+  done <ticket> --gen N --comment <file>   file: [{"criterion", "verdict", "evidence_url"}]
 
 prescan.json (written by cli/prescan):
   {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
@@ -34,7 +38,9 @@ import re
 import subprocess
 import sys
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 PLUGIN = Path(__file__).resolve().parent.parent
 THRESHOLD = {"day": 90, "away": 98}
@@ -42,6 +48,8 @@ RESERVE = 5
 CEILING = 80
 CLASS_BY_LABEL = {"ready-for-human": "human", "ready-for-agent": "agent"}
 CLASSES = ("agent", "human-verified", "human")
+ROLES = ("prescan", "implementer", "reviewer", "fixer", "verifier")  # GLOSSARY: Role
+VERDICTS = ("met", "not met", "needs your run")  # ADR 0003
 
 
 def out(obj, code=0):
@@ -179,16 +187,26 @@ def gh_list(path):
     return [json.loads(l) for l in run("gh", "api", "--paginate", path, "--jq", ".[]").splitlines()]
 
 
-def next_(a):
+def load(gen=None):
+    """The armed shift's repo, ledger path and ledger, after the lease and branch checks."""
     repo = json.loads(run("gh", "repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
-    state = runtime(repo)
-    if not state.exists() or not json.loads(state.read_text())["armed"]:
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    if not state.get("armed"):
         refuse(f"no shift is armed for {repo}")
-    path = Path(run("git", "rev-parse", "--show-toplevel")) / json.loads(state.read_text())["ledger"]
-    ledger = json.loads(path.read_text())
+    if gen is not None and gen != state["gen"]:
+        out({"ok": False, "lease": "lost", "stop": True,
+             "refused": f"--gen {gen} is stale; the lease is at generation {state['gen']}"}, 2)
+    branch = f"third-shift/{Path(state['ledger']).stem}"  # checked before the ledger is read
+    if run("git", "branch", "--show-current") != branch:
+        refuse(f"not on the shift branch {branch}")
+    path = Path(run("git", "rev-parse", "--show-toplevel")) / state["ledger"]
+    return repo, path, json.loads(path.read_text())
+
+
+def next_(a):
+    repo, path, ledger = load(a.gen)
     spec = ledger["opening"]["spec"]["number"]
-    if run("git", "branch", "--show-current") != ledger["opening"]["branch"]:
-        refuse(f"not on the shift branch {ledger['opening']['branch']}")
     closed = {i["number"] for i in gh_list(f"repos/{repo}/issues/{spec}/sub_issues")
               if i["state"] == "closed"}
     for n, t in ledger["tickets"].items():
@@ -204,9 +222,132 @@ def next_(a):
          **({} if first else {"frontier": "empty"})})
 
 
+def save(path, ledger, message):
+    """Write, commit and push the ledger; on any failure put the files, index and HEAD back."""
+    md = path.with_suffix(".md")
+    prior = path.read_text(), md.read_text(), run("git", "rev-parse", "HEAD")
+    try:
+        write_ledger(path, ledger)
+        commit_ledger(path, ledger["opening"]["branch"], message)
+    except Exception:  # a refusal writes nothing
+        subprocess.run(["git", "reset", "-q", "--soft", prior[2]], capture_output=True)
+        subprocess.run(["git", "reset", "-q", "--", str(path), str(md)], capture_output=True)
+        path.write_text(prior[0])
+        md.write_text(prior[1])
+        raise
+
+
+def ticket(ledger, n, *states):
+    t = ledger["tickets"].get(str(n))
+    if t is None:
+        refuse(f"#{n} is not a ticket of this shift")
+    if t["state"] not in states:
+        refuse(f"#{n} is {t['state']}, not {' or '.join(states)}")
+    return t
+
+
+def criteria(body):
+    """The checkbox lines under a ticket's `## Acceptance criteria` heading."""
+    m = re.search(r"^## Acceptance criteria[ \t]*$(.*?)(?=^#|\Z)", body.replace("\r", ""), re.M | re.S)
+    return re.findall(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", m.group(1) if m else "", re.M)
+
+
+def admit(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "Ready")
+    busy = [n for n, u in ledger["tickets"].items() if u["state"] == "In progress"]
+    if busy:
+        refuse(f"#{busy[0]} is already in progress; a shift works one ticket at a time")
+    body = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.ticket}"))["body"] or ""
+    frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
+    if criteria(body) == frozen:
+        t["state"], event = "In progress", "admitted"
+    else:
+        t.update(state="Needs you", reason="blocker",
+                 why="its acceptance criteria changed after the prescan froze them")
+        event = "needs you"
+    save(path, ledger, f"ledger: #{a.ticket} {event}")
+    out({"ok": True, "ticket": a.ticket, **t})
+
+
+def step(a):
+    _, path, ledger = load(a.gen)
+    ticket(ledger, a.ticket, "In progress")
+    if datetime.fromisoformat(a.end) < datetime.fromisoformat(a.start):
+        refuse(f"--end {a.end} is before --start {a.start}")
+    ledger.setdefault("steps", []).append({
+        "ticket": a.ticket, "role": a.role, "round": a.round, "model": a.model,
+        "effort": a.effort, "before": {"5h": a.before_5h, "weekly": a.before_weekly},
+        "after": {"5h": a.after_5h, "weekly": a.after_weekly},
+        "start": a.start, "end": a.end, "tokens": a.tokens, "outcome": a.outcome})
+    save(path, ledger, f"ledger: #{a.ticket} step")
+    out({"ok": True, "step": ledger["steps"][-1]})
+
+
+def done(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    rows = json.loads(Path(a.comment).read_text())
+    frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
+    if not frozen:
+        refuse(f"#{a.ticket} has no frozen criteria to close against")
+    if not isinstance(rows, list) or sorted(r.get("criterion") for r in rows) != sorted(frozen):
+        refuse(f"#{a.ticket} needs exactly one row per frozen criterion: {frozen}")
+    pinned = re.compile(rf"https://github\.com/{re.escape(repo)}/blob/([0-9a-f]{{40}})/([^#?\s]+)"
+                        r"(?:#L[1-9]\d*(?:-L[1-9]\d*)?)?")
+    top = run("git", "rev-parse", "--show-toplevel")  # git resolves ./ and ../ against the cwd
+    for r in rows:
+        if r.get("verdict") not in VERDICTS:
+            refuse(f"no verdict for {r['criterion']!r}; one of {', '.join(VERDICTS)}")
+        m = pinned.fullmatch(r.get("evidence_url") or "")
+        file = m and unquote(m[2])
+        kind = (m and not {"", ".", ".."} & set(file.split("/"))
+                and Path(top, file) not in (path, path.with_suffix(".md"))
+                and subprocess.run(["git", "cat-file", "-t", f"{m[1]}:{file}"], cwd=top,
+                                   capture_output=True, text=True).stdout.strip())
+        if kind != "blob" or subprocess.run(  # on the shift branch, so the permalink resolves
+                ["git", "merge-base", "--is-ancestor", m[1], "HEAD"], capture_output=True).returncode:
+            refuse(f"no commit-pinned evidence in this repo for {r['criterion']!r}")
+        if r["verdict"] == "not met":
+            refuse(f"{r['criterion']!r} is not met")
+    unrun = [r["criterion"] for r in rows if r["verdict"] == "needs your run"]
+    t["verdicts"] = rows
+    if unrun:
+        t.update(state="Needs you", reason="human-verify",
+                 why=f"needs your run: {'; '.join(unrun)}")
+    else:
+        t["state"] = "Done"
+    save(path, ledger, f"ledger: #{a.ticket} {t['state'].lower()}")
+    cell = lambda s: s.replace("|", "\\|")
+    out({"ok": True, "ticket": a.ticket, **t, "comment": "\n".join([
+        "| Criterion | Verdict | Evidence |", "| --- | --- | --- |",
+        *(f"| {cell(r['criterion'])} | {r['verdict']} | [evidence]({r['evidence_url']}) |"
+          for r in rows)])})
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):  # ADR 0003 keeps exit 2 for a lost lease
         refuse(message)
+
+
+def at_least(low):
+    def check(v):
+        if int(v) < low:
+            raise ValueError(v)
+        return int(v)
+    check.__name__ = f"whole number {low} or more"  # argparse names the type in its error
+    return check
+
+
+def percent(v):
+    if not 0 <= int(v) <= 100:
+        raise ValueError(v)
+    return int(v)
+
+
+def timestamp(v):
+    datetime.fromisoformat(v)
+    return v
 
 
 def main():
@@ -217,10 +358,30 @@ def main():
     s.add_argument("--sitting", required=True)
     s.add_argument("--mode", required=True, choices=["day", "away"])
     s.add_argument("--ceiling", default=str(CEILING))
-    sub.add_parser("next")
+    s = sub.add_parser("next")
+    s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("admit")
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("step")
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--role", required=True, choices=ROLES)
+    s.add_argument("--round", required=True, type=at_least(1))
+    for f in ("model", "effort", "outcome"):
+        s.add_argument(f"--{f}", required=True)
+    for f in ("before-5h", "before-weekly", "after-5h", "after-weekly"):
+        s.add_argument(f"--{f}", required=True, type=percent)
+    for f in ("start", "end"):
+        s.add_argument(f"--{f}", required=True, type=timestamp)
+    s.add_argument("--tokens", required=True, type=at_least(0))
+    s = sub.add_parser("done")
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--comment", required=True)
     a = p.parse_args()
     try:
-        {"arm": arm, "next": next_}[a.cmd](a)
+        {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done}[a.cmd](a)
     except subprocess.CalledProcessError as e:
         refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
     except Exception as e:  # ADR 0003: one JSON object, never a stack trace
