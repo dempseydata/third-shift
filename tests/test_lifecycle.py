@@ -4,7 +4,7 @@ import json
 import unittest
 
 from tests.test_shift import issue
-from tests.test_tickets import BRANCH, Armed
+from tests.test_tickets import Armed
 
 
 class Working(Armed):
@@ -31,6 +31,7 @@ class Working(Armed):
 
 class InProgress(Working):
     """21 In progress, 22 Backlog, 23 Needs you (human), 24 Done, 25 Ready."""
+    fixture = "admitted"
 
     # needs-you
 
@@ -197,48 +198,6 @@ class Waiting(Working):
         code, out = self.release(23, "--decision", "go")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.runtime()["shift_state"], "running")
-
-
-class FastForward(Armed):
-    """An armed shift whose end state, chosen at the sitting, is fast-forward."""
-    def prepare(self):
-        self.sitting["end_state"] = "fast-forward"
-        super().prepare()
-
-    def test_end_fast_forwards_the_default_branch_and_pushes(self):
-        code, out = self.shift("end", "--gen", "1", "--reason", "frontier empty")
-        self.assertEqual((code, out["end_state"]), (0, "fast-forward"), out)
-        self.assertEqual(self.git("log", "-1", "--format=%s", "main", cwd=self.remote),
-                         "ledger: #20 ended")
-        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote),
-                         self.git("rev-parse", BRANCH, cwd=self.remote))
-
-    def test_end_killed_at_the_push_completes_when_run_again(self):
-        hook = self.remote / "hooks" / "pre-receive"
-        hook.write_text("#!/bin/sh\np=$PPID\nwhile [ \"$p\" -gt 1 ]; do\n"  # kill the script
-                        "  case \"$(ps -o command= -p $p)\" in *cli/shift*) kill -9 $p; exit 1;; esac\n"
-                        "  p=$(ps -o ppid= -p $p | tr -d ' ')\ndone\nexit 1\n")
-        hook.chmod(0o755)
-        self.assertNotEqual(self.shift("end", "--gen", "1", "--reason", "x")[0], 0)
-        self.assertTrue(self.runtime()["armed"])
-        hook.unlink()
-        code, out = self.shift("end", "--gen", "1", "--reason", "x")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(self.runtime()["shift_state"], "ended")
-        self.assertEqual(self.git("rev-parse", "main", cwd=self.remote),
-                         self.git("rev-parse", BRANCH, cwd=self.remote))
-
-    def test_end_refuses_when_the_default_branch_cannot_fast_forward(self):
-        self.git("checkout", "-q", "main")
-        (self.target / "moved").write_text("moved")
-        self.git("add", "moved")
-        self.git("commit", "-qm", "moved")
-        self.git("push", "-q", "origin", "main")
-        self.git("checkout", "-q", BRANCH)
-        before = self.snapshot()
-        code, out = self.shift("end", "--gen", "1", "--reason", "x")
-        self.assertEqual(code, 1, out)
-        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

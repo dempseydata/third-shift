@@ -44,8 +44,15 @@ class Armed(Target):
     def state(self, n):
         return self.ledger()["tickets"][str(n)]
 
-    def admit(self, n=21, gen="1"):
-        return self.shift("admit", str(n), "--gen", gen)
+    RESET = "2026-11-20T05:00:00+00:00"
+
+    def readings(self, five_hour=10, *weekly, guess=5):
+        """Usage readings as the start skill passes them at a step boundary."""
+        return ("--5h", str(five_hour), "--reset", self.RESET,
+                *(x for w in weekly or (10,) for x in ("--weekly", str(w))), "--guess", str(guess))
+
+    def admit(self, n=21, gen="1", readings=None):
+        return self.shift("admit", str(n), "--gen", gen, *(readings or self.readings()))
 
     def evidence(self, name="verify/evidence/21.txt"):
         (self.target / name).parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +168,7 @@ class Tickets(Armed):
 class Building(Armed):
     """step and done on #21 In progress."""
     admitted = True
+    fixture = "admitted"  # shared with tests.test_lifecycle.InProgress
 
     def test_admit_refuses_a_second_ticket_while_one_is_in_progress(self):
         self.issue_body(25, "## Acceptance criteria\n\n- [ ] Looks right\n")
@@ -178,7 +186,7 @@ class Building(Armed):
             "ticket": 21, "role": "implementer", "round": 1, "model": "opus", "effort": "high",
             "before": {"5h": 40, "weekly": 12}, "after": {"5h": 47, "weekly": 13},
             "start": "2026-11-20T01:00:00+00:00", "end": "2026-11-20T01:20:00+00:00",
-            "tokens": 81234, "outcome": "built"}])
+            "tokens": 81234, "outcome": "built", "points": 7}])
         self.assert_ledger_commit("ledger: #21 step")
         self.assertEqual(self.step()[0], 0)
         self.assertEqual(len(self.ledger()["steps"]), 2)
@@ -267,6 +275,8 @@ class Building(Armed):
 
 class NoCriteria(Armed):
     armed = False  # the test arms with its own prescan
+    fixture = "unarmed"  # shared with tests.test_shift.Shift, so it builds the same state:
+    prepare = Target.prepare  # no body for #21; the test sets its own
 
     def test_done_refuses_a_ticket_with_no_frozen_criteria(self):
         self.prescan["tickets"][0]["criteria"] = []

@@ -8,15 +8,19 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | --- | --- | --- | --- | --- | --- |
 | #21 | closed | e761863 | 3 | 35 tests, 51 s | arm + next, test seam with fake gh |
 | #22 | closed | bbb714b | 2 | 55 tests, 119 s | admit, step, done with commit-pinned evidence; suite past 2× baseline |
-| #23 | closed | (this commit) | 1 | 78 tests, 99 s | needs-you, stall, release, note, wait, end; suite cut 118→61 s for old tests |
+| #23 | closed | 370b4f2 | 1 | 78 tests, 99 s | needs-you, stall, release, note, wait, end; suite cut 118→61 s for old tests |
+| #24 | closed | (this commit) | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
 
 ## Owed
 - #25: `arm` does not copy prescan.json and sitting.json into runtime state, though the spec's Records section lists them there; revival will need them (from #21 review).
 - #22: ~~`next` checks the branch before reading the ledger~~ — paid in #22.
 - #28: `done` renders the closing comment but neither posts it nor closes the issue; no ticket owns closing the issue — #28 should post the comment and close (from #22 review).
-- #24: `admit` applies no usage gate yet; the spec's table puts the gate in admit, ADR 0003 adds `step --begin` (from #22 review).
+- #24: ~~gate in admit and step --begin~~ — paid in #24.
 - #23: ~~suite speed~~ — paid in #23 (class fixtures copied per test).
-- #24: the suite is 99–103 s, at twice the 51 s baseline. Keep new tests on class-level fixtures; merge small classes (e.g. `FastForward` in tests/test_lifecycle.py) to save fixture builds (from #23 review).
+- #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
+- #25: the suite is 102–104 s, past twice the 51 s baseline. Cut setup: fewer git processes per fixture copy, fewer push round-trips, merge classes sharing a state; target under 90 s (from #24).
+- #25: `pause --until` (cli/shift ~604) parses with `timestamp`, not `zoned`, so a reset time without a timezone can be stored; use `type=zoned` (from #24 review).
+- later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
 - #21: spec slug is `<number>-<slugified title>` (bare number if the title slugs to nothing); ledger `docs/third-shift-ledger/<slug>.json` + `.md`; branch `third-shift/<slug>` — ADR? yes (hard to reverse: names the target's files and branch)
@@ -43,6 +47,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #23: fast-forward end state is one atomic push of both refs; refuses and writes nothing if not fast-forwardable; disarm only after every push succeeds — ADR? no
 - #23: tests run the script with the suite's Python; one test keeps `uv run --script` — ADR? no
 
+- #24: usage readings reach the script as flags on `admit` and `step --begin`: `--5h P --reset ISO --weekly P` (repeatable; the gate takes the highest) or `--unreadable`, plus `--guess G` (the role table's starting figure) — ADR? yes (the contract #37's loop must speak)
+- #24: `admit` gates as the implementer and exits 1 on any answer but proceed; `step --begin` exits 0 with any answer — ADR? no (ADR 0003)
+- #24: the unreadable count persists in runtime state even when admission is refused — the one exception to "refusals write nothing" — ADR? no (spec: three failures in a row)
+- #24: a reading after a window reset mid-step is the after-reading, marked `lower_bound` — ADR? no (map #6)
+- #24: `pause --reason usage|owner`; pause and resume commit to the ledger — ADR? no
+- #24: the gate's pause point is capped at 99% in every mode; while paused the gate answers pause-until — ADR? no (map #6)
+
 ## Blocked
 
 ## Nits
@@ -59,3 +70,5 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #23: releasing a human ticket sends human work to the agent frontier
 - #23: the kill test's assertions would also pass on a plain push failure
 - #23: refusal messages include temp paths
+- #24: a window reset whose after-reading is ≥ the before-reading goes undetected
+- #24: a single `--weekly` reading is accepted

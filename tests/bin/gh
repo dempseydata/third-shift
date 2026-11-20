@@ -1,41 +1,11 @@
-#!/usr/bin/env python3
-"""Fake gh for the script suite (ADR 0007).
-
-Reads canned answers from $FAKE_GH_DIR/fixture.json:
-  {"repo": "owner/name", "api": {"<api path>": <json>, ...}}
-Serves `gh repo view --json nameWithOwner` and GET `gh api <path>` (with `--jq .[]`
-printing one compact element per line, as real gh does). Every other call is a write:
-it is appended to $FAKE_GH_DIR/writes.jsonl as its argument list and succeeds silently.
-"""
-import json
-import os
-import sys
-
-root = os.environ["FAKE_GH_DIR"]
-args = sys.argv[1:]
-with open(os.path.join(root, "fixture.json")) as f:
-    fixture = json.load(f)
-
-if args[:2] == ["repo", "view"]:
-    print(json.dumps({"nameWithOwner": fixture["repo"]}))
-    sys.exit(0)
-
-is_get = (
-    args[:1] == ["api"]
-    and not {"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"} & set(args)
-)
-if is_get:
-    path = next(a for a in args[1:] if not a.startswith("-") and a != ".[]")
-    if path not in fixture["api"]:
-        print(f"gh: Not Found (HTTP 404) {path}", file=sys.stderr)
-        sys.exit(1)
-    body = fixture["api"][path]
-    if "--jq" in args and args[args.index("--jq") + 1] == ".[]":
-        for item in body:
-            print(json.dumps(item))
-    else:
-        print(json.dumps(body))
-    sys.exit(0)
-
-with open(os.path.join(root, "writes.jsonl"), "a") as f:
-    f.write(json.dumps(args) + "\n")
+#!/bin/sh
+# Fake gh for the script suite (ADR 0007): tests/bin/fake_gh.py, but `repo view`, which every
+# state-script command asks, is answered here, since a shell starts in a fifth of the time.
+if [ "$1 $2" = "repo view" ]; then
+  read -r line < "$FAKE_GH_DIR/fixture.json"  # one line, as json.dumps writes it
+  repo=${line#*'"repo":'}
+  repo=${repo#*'"'}
+  printf '{"nameWithOwner": "%s"}\n' "${repo%%\"*}"
+  exit 0
+fi
+exec python3 -I -S "${0%/*}/fake_gh.py" "$@"

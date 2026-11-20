@@ -14,6 +14,7 @@ SHIFT = ROOT / "cli" / "shift"
 REPO = "acme/widget"
 SLUG = "20-widget-version-1"
 LEDGER = Path("docs/third-shift-ledger") / f"{SLUG}.json"
+TEMPLATES = {}  # fixture name: (folder, base commit); each folder goes when the run ends
 
 
 def issue(number, state="open"):
@@ -24,7 +25,8 @@ class Target(unittest.TestCase):
     """A temp target repo, its bare remote, runtime folder and fake gh; no tests.
 
     The first test of each class builds the fixture (and runs `prepare`); the rest copy it,
-    which skips the costly git set-up and arm."""
+    which skips the costly git set-up and arm. Classes naming the same `fixture`, whose
+    `prepare` builds the same state, share one build."""
     armed = False
 
     def setUp(self):
@@ -38,19 +40,22 @@ class Target(unittest.TestCase):
         self.target = self.tmp / "target"
         self.env = {
             **os.environ,
-            "PATH": f"{ROOT / 'tests' / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            # the fake gh runs on the suite's Python, which starts in a third of the time
+            "PATH": os.pathsep.join([str(ROOT / "tests" / "bin"), str(Path(sys.executable).parent),
+                                     os.environ["PATH"]]),
             "THIRD_SHIFT_HOME": str(self.home),
             "FAKE_GH_DIR": str(self.gh),
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
         }
         cls = type(self)
-        template = cls.__dict__.get("template")  # never a parent class's
+        key = cls.__dict__.get("fixture", f"{cls.__module__}.{cls.__qualname__}")  # not a parent's
+        template = TEMPLATES.get(key)
         if template:
-            shutil.copytree(template, self.tmp, symlinks=True, dirs_exist_ok=True,
+            shutil.copytree(template[0].name, self.tmp, symlinks=True, dirs_exist_ok=True,
                             copy_function=shutil.copy)  # copy2's metadata costs 5x
             self.git("remote", "set-url", "origin", str(self.remote))
-            self.base = cls.base
+            self.base = template[1]
         else:
             self.git("init", "-q", "--bare", "-b", "main", str(self.remote), cwd=self.tmp)
             self.git("clone", "-q", str(self.remote), str(self.target), cwd=self.tmp)
@@ -91,11 +96,14 @@ class Target(unittest.TestCase):
         if not template:
             self.tracker({21: [], 22: [issue(21)], 23: [], 25: []})
             self.prepare()
+            for repo in (self.target, self.remote):  # fewer files to copy per test
+                self.git("repack", "-adq", cwd=repo)
+            for sample in self.tmp.rglob("hooks/*.sample"):
+                sample.unlink()
             keep = tempfile.TemporaryDirectory()
-            cls.addClassCleanup(keep.cleanup)
             shutil.copytree(self.tmp, keep.name, symlinks=True, dirs_exist_ok=True,
                             copy_function=shutil.copy)
-            cls.template, cls.base = keep.name, self.base
+            TEMPLATES[key] = keep, self.base
 
     def prepare(self):
         """The state every test of the class starts from, built once and copied."""
@@ -136,6 +144,7 @@ class Target(unittest.TestCase):
 
 
 class Shift(Target):
+    fixture = "unarmed"  # shared with tests.test_tickets.NoCriteria
     # arm
 
     def test_arm_writes_the_opening_entry(self):
@@ -240,8 +249,8 @@ class Shift(Target):
         self.sitting["classes"]["25"] = "bogus"
         self.assert_refused(self.arm()[0])
 
-    def test_arm_refuses_a_negative_or_unreadable_ceiling(self):
-        for ceiling in ("-5", "abc"):
+    def test_arm_refuses_a_negative_unreadable_or_over_100_ceiling(self):
+        for ceiling in ("-5", "abc", "101"):
             code, out = self.arm("--ceiling", ceiling)
             self.assert_refused(code)
             self.assertIn("refused", out)

@@ -10,9 +10,12 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
 
   arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none]
   next --gen N
-  admit <ticket> --gen N
+  admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits
+  step <ticket> --begin --gen N --role R READINGS   the usage gate at a later step boundary
   step <ticket> --gen N --role R --round K --model M --effort E --before-5h P --before-weekly P
        --after-5h P --after-weekly P --start ISO --end ISO --tokens T --outcome TEXT
+  pause --gen N --reason usage|owner --until ISO   (the reset time)
+  resume --gen N
   done <ticket> --gen N --comment <file>   file: [{"criterion", "verdict", "evidence_url"}]
   needs-you <ticket> --gen N --reason blocker|human-verify|human|"set aside after a crash" --why W
   stall <ticket> --gen N --why W
@@ -21,6 +24,14 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
        always, for owed
   wait --gen N
   end --gen N --reason R   applies the sitting's end state, then disarms
+
+READINGS, from the desktop app's usage tool (whole percent used):
+  --5h P --reset ISO --weekly P [--weekly P ..] --guess G   one --weekly per weekly window
+  --unreadable --guess G                                     when the tool did not answer
+  --guess is the role's starting cost from the role table, used until the role has steps.
+The gate answers {"gate": "proceed"|"pause-until"|"retry"|"end", "reason", "until",
+"retry_in_minutes", "estimate": {"points", "guess"}}; `step --begin` exits 0 with any answer,
+`admit` exits 1 (refused) with any answer but proceed.
 
 prescan.json (written by cli/prescan):
   {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
@@ -45,7 +56,7 @@ import re
 import subprocess
 import sys
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -53,6 +64,9 @@ PLUGIN = Path(__file__).resolve().parent.parent
 THRESHOLD = {"day": 90, "away": 98}
 RESERVE = 5
 CEILING = 80
+LOOK_BACK = 5  # steps of a role the look-ahead takes its largest cost from
+RETRY_MINUTES = 10
+UNREADABLE_LIMIT = 3
 CLASS_BY_LABEL = {"ready-for-human": "human", "ready-for-agent": "agent"}
 CLASSES = ("agent", "human-verified", "human")
 ROLES = ("prescan", "implementer", "reviewer", "fixer", "verifier")  # GLOSSARY: Role
@@ -121,8 +135,8 @@ def arm(a):
     if state_file.exists() and json.loads(state_file.read_text()).get("armed"):
         refuse(f"a shift is already armed for {prescan['repo']}")
     ceiling = None if a.ceiling == "none" else int(a.ceiling)
-    if ceiling is not None and ceiling < 0:
-        refuse(f"the ceiling must be 0 or more, or none: {a.ceiling}")
+    if ceiling is not None and not 0 <= ceiling <= 100:
+        refuse(f"the ceiling must be 0 to 100, or none: {a.ceiling}")
     failed = [c["name"] for c in prescan["checks"] if not c["ok"]]
     if failed:
         refuse(f"checks failed: {', '.join(failed)}")
@@ -208,9 +222,10 @@ def load(gen=None):
         out({"ok": False, "lease": "lost", "stop": True,
              "refused": f"--gen {gen} is stale; the lease is at generation {state['gen']}"}, 2)
     branch = f"third-shift/{Path(state['ledger']).stem}"  # checked before the ledger is read
-    if run("git", "branch", "--show-current") != branch:
+    top, on = run("git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD").splitlines()
+    if on != branch:  # one git call for both: every command pays for each process
         refuse(f"not on the shift branch {branch}")
-    path = Path(run("git", "rev-parse", "--show-toplevel")) / state["ledger"]
+    path = Path(top) / state["ledger"]
     return repo, path, json.loads(path.read_text())
 
 
@@ -262,12 +277,49 @@ def criteria(body):
     return re.findall(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", m.group(1) if m else "", re.M)
 
 
+def gate(a, repo, ledger, role, limit):
+    """The usage gate (spec: Usage gate) for the next step of `role`, below `limit`."""
+    readings = [f for f in ("five_hour", "reset", "weekly") if getattr(a, f) is not None]
+    if a.guess is None:
+        refuse("--guess, the role's starting cost from the role table, is required")
+    if a.unreadable == bool(readings) or not (a.unreadable or len(readings) == 3):
+        refuse("give --5h, --reset and --weekly, or --unreadable alone")
+    state_file = runtime(repo)  # the failure count survives between boundaries
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] == "paused":
+        return {"gate": "pause-until", "until": state["until"],
+                "reason": f"the shift is paused until {state['until']}"}
+    failures = state.get("unreadable", 0) + 1 if a.unreadable else 0
+    if failures != state.get("unreadable", 0):
+        state_file.write_text(json.dumps({**state, "unreadable": failures}) + "\n")
+    if a.unreadable:
+        if failures >= UNREADABLE_LIMIT:
+            return {"gate": "end", "reason": f"usage unreadable {failures} times in a row"}
+        return {"gate": "retry", "retry_in_minutes": RETRY_MINUTES, "reason": "usage unreadable"}
+    ceiling, weekly = ledger["opening"]["ceiling"], max(a.weekly)
+    if ceiling is not None and weekly >= ceiling:
+        return {"gate": "end", "reason": f"weekly usage {weekly}% reached the ceiling {ceiling}%"}
+    costs = [s["points"] for s in ledger.get("steps", []) if s["role"] == role][-LOOK_BACK:]
+    estimate = {"points": max(costs) if costs else a.guess, "guess": not costs}
+    limit = min(limit, 99)  # map ticket #6: the gate never reaches 100%, reserve or not
+    if a.five_hour >= limit:
+        why = f"5-hour usage {a.five_hour}% reached {limit}%"
+    elif a.five_hour + estimate["points"] >= 100:
+        why = f"5-hour usage {a.five_hour}% plus a {role} step of {estimate['points']} reaches 100%"
+    else:
+        return {"gate": "proceed", "estimate": estimate}
+    return {"gate": "pause-until", "until": a.reset, "reason": why, "estimate": estimate}
+
+
 def admit(a):
     repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "Ready")
     busy = [n for n, u in ledger["tickets"].items() if u["state"] == "In progress"]
     if busy:
         refuse(f"#{busy[0]} is already in progress; a shift works one ticket at a time")
+    g = gate(a, repo, ledger, "implementer", ledger["opening"]["threshold"])  # a ticket's first step
+    if g["gate"] != "proceed":
+        out({"ok": False, "refused": g["reason"], **g}, 1)
     body = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.ticket}"))["body"] or ""
     frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
     if criteria(body) == frozen:
@@ -277,19 +329,34 @@ def admit(a):
                  why="its acceptance criteria changed after the prescan froze them")
         event = "needs you"
     save(path, ledger, f"ledger: #{a.ticket} {event}")
-    out({"ok": True, "ticket": a.ticket, **t})
+    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"]})
+
+
+RECORD = ("round", "model", "effort", "outcome", "before_5h", "before_weekly", "after_5h",
+          "after_weekly", "start", "end", "tokens")
 
 
 def step(a):
-    _, path, ledger = load(a.gen)
-    ticket(ledger, a.ticket, "In progress")
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    if a.begin:  # an admitted ticket's later steps may use the reserve
+        o = ledger["opening"]
+        out({"ok": True, "ticket": a.ticket, **gate(a, repo, ledger, a.role,
+                                                    o["threshold"] + o["reserve"])})
+    missing = [f"--{f.replace('_', '-')}" for f in RECORD if getattr(a, f) is None]
+    if missing:
+        refuse(f"a step record needs {', '.join(missing)}")
     if datetime.fromisoformat(a.end) < datetime.fromisoformat(a.start):
         refuse(f"--end {a.end} is before --start {a.start}")
+    points = a.after_5h - a.before_5h  # whole points; usage is account-wide
     ledger.setdefault("steps", []).append({
         "ticket": a.ticket, "role": a.role, "round": a.round, "model": a.model,
         "effort": a.effort, "before": {"5h": a.before_5h, "weekly": a.before_weekly},
         "after": {"5h": a.after_5h, "weekly": a.after_weekly},
-        "start": a.start, "end": a.end, "tokens": a.tokens, "outcome": a.outcome})
+        "start": a.start, "end": a.end, "tokens": a.tokens, "outcome": a.outcome,
+        # the window reset during the step: only the new window's points are known
+        **({"points": points} if points >= 0 else {"points": a.after_5h, "lower_bound": True})})
+    t["usage"] = t.get("usage", 0) + ledger["steps"][-1]["points"]
     save(path, ledger, f"ledger: #{a.ticket} step")
     out({"ok": True, "step": ledger["steps"][-1]})
 
@@ -394,6 +461,35 @@ def wait(a):
     out({"ok": True, "shift_state": "waiting"})
 
 
+def pause(a):
+    repo, path, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "running":
+        refuse(f"the shift is {state['shift_state']}, not running")
+    ledger.setdefault("pauses", []).append({"reason": a.reason, "until": a.until, "at": now()})
+    save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} paused")
+    state_file.write_text(json.dumps({**state, "shift_state": "paused", "until": a.until}) + "\n")
+    out({"ok": True, "shift_state": "paused", "until": a.until})
+
+
+def resume(a):
+    repo, path, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "paused":
+        refuse(f"the shift is {state['shift_state']}, not paused")
+    ledger["pauses"][-1]["resumed"] = now()
+    save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} resumed")
+    state.pop("until", None)
+    state_file.write_text(json.dumps({**state, "shift_state": "running"}) + "\n")
+    out({"ok": True, "shift_state": "running"})
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def end(a):
     repo, path, ledger = load(a.gen)
     o = ledger["opening"]
@@ -446,6 +542,15 @@ def timestamp(v):
     return v
 
 
+def zoned(v):
+    if datetime.fromisoformat(v).tzinfo is None:
+        raise ValueError(v)
+    return v
+
+
+zoned.__name__ = "timestamp with a timezone"
+
+
 def main():
     p = Parser(prog="shift")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -456,21 +561,25 @@ def main():
     s.add_argument("--ceiling", default=str(CEILING))
     s = sub.add_parser("next")
     s.add_argument("--gen", type=int, required=True)
-    s = sub.add_parser("admit")
-    s.add_argument("ticket", type=int)
-    s.add_argument("--gen", type=int, required=True)
-    s = sub.add_parser("step")
-    s.add_argument("ticket", type=int)
-    s.add_argument("--gen", type=int, required=True)
+    for cmd in ("admit", "step"):
+        s = sub.add_parser(cmd)
+        s.add_argument("ticket", type=int)
+        s.add_argument("--gen", type=int, required=True)
+        s.add_argument("--5h", dest="five_hour", type=percent)
+        s.add_argument("--reset", type=zoned)
+        s.add_argument("--weekly", action="append", type=percent)
+        s.add_argument("--unreadable", action="store_true")
+        s.add_argument("--guess", type=at_least(0))
+    s.add_argument("--begin", action="store_true")
     s.add_argument("--role", required=True, choices=ROLES)
-    s.add_argument("--round", required=True, type=at_least(1))
+    s.add_argument("--round", type=at_least(1))
     for f in ("model", "effort", "outcome"):
-        s.add_argument(f"--{f}", required=True)
+        s.add_argument(f"--{f}")
     for f in ("before-5h", "before-weekly", "after-5h", "after-weekly"):
-        s.add_argument(f"--{f}", required=True, type=percent)
+        s.add_argument(f"--{f}", type=percent)
     for f in ("start", "end"):
-        s.add_argument(f"--{f}", required=True, type=timestamp)
-    s.add_argument("--tokens", required=True, type=at_least(0))
+        s.add_argument(f"--{f}", type=timestamp)
+    s.add_argument("--tokens", type=at_least(0))
     s = sub.add_parser("done")
     s.add_argument("ticket", type=int)
     s.add_argument("--gen", type=int, required=True)
@@ -489,6 +598,12 @@ def main():
     s.add_argument("--gen", type=int, required=True)
     s.add_argument("--text", required=True, type=text)
     s.add_argument("--for", dest="for_", type=int)
+    s = sub.add_parser("pause")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--reason", required=True, choices=("usage", "owner"))  # spec: Shift states
+    s.add_argument("--until", required=True, type=timestamp)
+    s = sub.add_parser("resume")
+    s.add_argument("--gen", type=int, required=True)
     s = sub.add_parser("wait")
     s.add_argument("--gen", type=int, required=True)
     s = sub.add_parser("end")
@@ -498,7 +613,7 @@ def main():
     try:
         {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,
          "needs-you": needs_you, "stall": stall, "release": release, "note": note,
-         "wait": wait, "end": end}[a.cmd](a)
+         "pause": pause, "resume": resume, "wait": wait, "end": end}[a.cmd](a)
     except subprocess.CalledProcessError as e:
         refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
     except Exception as e:  # ADR 0003: one JSON object, never a stack trace
