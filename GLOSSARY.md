@@ -48,7 +48,7 @@ A ticket that kept stopping without progress and was set aside; the shift carrie
 
 **Usage gate**:
 The check, made before work proceeds, of plan usage against the 5-hour threshold for the time of day, with the weekly limit able to veto.
-_Avoid_: throttle (reserved for a possible skill name)
+_Avoid_: throttle
 
 **Pause**:
 A shift holding all admissions until the 5-hour window resets.
