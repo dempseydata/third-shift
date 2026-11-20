@@ -10,7 +10,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #22 | closed | bbb714b | 2 | 55 tests, 119 s | admit, step, done with commit-pinned evidence; suite past 2× baseline |
 | #23 | closed | 370b4f2 | 1 | 78 tests, 99 s | needs-you, stall, release, note, wait, end; suite cut 118→61 s for old tests |
 | #24 | closed | 8c31748 | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
-| #25 | closed | (this commit) | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
+| #25 | closed | ed40762 | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
+| #26 | closed | (this commit) | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -20,6 +21,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #23: ~~suite speed~~ — paid in #23 (class fixtures copied per test).
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
+- #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -61,6 +63,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #25: is-dead never counts a waiting shift or an owner pause as dead; a usage pause is dead only after reset + 15 min (map #10) — ADR? no
 - #25: a ticket in progress across two crashes → Needs you, "set aside after a crash" — ADR? no (map #15)
 
+- #26: the Stop hook fails open: any failure exits 1 (non-blocking per the hook docs); the watchman is the backstop — ADR? yes (safety posture of the gate)
+- #26: stop-check prints only the hook's fields: `{}` to allow, `{decision, reason}` to block — ADR? no (compatible with ADR 0003)
+- #26: progress = the ledger file changed (map #15); the third blocked stop without progress stalls the In progress ticket; with nothing In progress it allows the stop and resets the count; `stop_hook_active` is ignored — ADR? no
+- #26: the stall row is read from ledger commit messages since the last `armed`; done, needs-you and released break it; three stalls end the shift, blocking once to say so — ADR? no
+- #26: the gate's "end" answer is recorded in runtime state; revive clears it — ADR? no
+- #26: Backlog tickets whose blockers are all Done count as work left; stall refs `stalled-<n>-<k>` — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -83,3 +92,5 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #25: malformed hook stdin is refused before the armed check
 - #25: the threaded runner skips setUpClass/module fixtures and ignores failfast and `-b`
 - #25: tests/test_revival.py ~98 comment claims glob order is sorted
+- #26: the `armed` and `released` stall-row breaks have no committed test
+- #26: the Stop hook's timeout behaviour not checked

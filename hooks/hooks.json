@@ -11,6 +11,16 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --script \"${CLAUDE_PLUGIN_ROOT}/cli/shift\" stop-check"
+          }
+        ]
+      }
     ]
   }
 }
