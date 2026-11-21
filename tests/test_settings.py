@@ -128,7 +128,7 @@ class Settings(unittest.TestCase):
                                "".join(p.read_text() for p in (ROOT / "skills").rglob("*.md"))))
         self.assertTrue({"shift", "prescan", "settings"} <= calls, calls)
         rules = [r[5:-1] for r in RULES["allow"] if r.startswith("Bash(uv ")]
-        for script in calls - {"settings"}:  # setup runs attended: its script may prompt
+        for script in calls - {"settings", "recipe"}:  # setup runs attended: its scripts may prompt
             cmd = f'uv run --script "/plugins/cache/third-shift/0.1.0/cli/{script}" arm --gen 1'
             self.assertTrue(any(fnmatch.fnmatchcase(cmd, r) for r in rules), cmd)
 

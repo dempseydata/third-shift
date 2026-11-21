@@ -20,7 +20,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #32 | closed | 5a9451f | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
 | #33 | open (human-verified) | 8b2becd | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
 | #34 | open (human-verified) | 7b5779f | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
-| #35 | open (human-verified) | (this commit) | 1 | 220 tests, 72 s | setup skill (per machine), cli/settings; live-only; round-1 fix checked by the orchestrator |
+| #35 | open (human-verified) | 2636a6b | 1 | 220 tests, 72 s | setup skill (per machine), cli/settings; live-only; round-1 fix checked by the orchestrator |
+| #36 | open (human-verified) | (this commit) | 1 | 228 tests, 70 s | setup per target: board, pin, recipe drafts, proof in a scratch copy, cli/recipe; live-only; round-1 fix checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -36,7 +37,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #34: ~~prescan questions → sitting gaps~~ — paid in #34.
 - #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
 - #35: ~~settings from cli/rules.json; allow patterns match~~ — paid in #35.
-- #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
+- #36: ~~Proven section format~~ — paid in #36 (`cli/recipe proven`, tested against the real prescan check).
 - #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
 - #34: ~~Prescan usage; missing recipe~~ — paid in #34 (prescan usage not recorded, nothing is armed; a missing recipe fails `recipe proven`).
 - #38: the scheduled-task tool takes no working folder, so `start revive <owner/repo>` must find the target folder from runtime state.json's `target`; the watchman's task id is in state.json (`arm --watchman`) for removal at end (from #34 review).
@@ -133,6 +134,10 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #35: cli/settings shows missing rules by default; `--write` appends them, keeps everything else, keeps the file's mode and symlink, refuses unreadable or read-only files, atomic — ADR? no
 - #35: the builder types `! gh auth refresh -s project` (browser sign-in); the Mac checklist runs first, so the Remote Control refusal and a missing uv refuse before any edit — ADR? no
 
+- #36: setup makes two commits, `third-shift: setup` then `third-shift: setup proven`, where the ticket says one: the Proven line cannot name the commit that holds it (forced); a PR must be merge-committed, not squashed; PR branch `third-shift/setup` — ADR? yes (departs from the ticket's wording)
+- #36: `cli/recipe pin` picks the newest released `@playwright/test` whose chromium is installed (assumes revisions grow with versions); setup asks for a spec number for setup-board; drafts `e2e/setup.spec.ts` as the proving test — ADR? no
+- #36: the deliberate break runs in an rsync copy under `.git/third-shift/prove` (map #16: a scratch copy), removed on every path; Proven is recorded only when this run proved it — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -181,3 +186,5 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #33: how `plugin eval` combines regex and rubric graders into one run's pass is unchecked
 - #34: whether `update_scheduled_task` (used when a stale watchman id is in use) returns an id is unchecked
 - #35: a dangling settings symlink creates the folder it points to
+- #36: a rerun after a failed proof refuses because of setup's own uncommitted drafts
+- #36: whether `blockWritesOutsideWorkingDirectories` blocks npm's cache writes is unchecked
