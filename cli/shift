@@ -64,7 +64,8 @@ prescan.json (written by cli/prescan):
    "tickets": [{"number", "title", "state": "open"|"closed", "labels": [..],
                 "blocked_by": [issue numbers, native links only], "criteria": [text, ..]}],
    "questions": [text, ..] (for the sitting; arm does not read them),
-   "checks": [{"name", "ok": bool, "detail"}], "warnings": [text, ..],
+   "checks": [{"name", "ok": bool, "detail", "mode": "away" (counts only for that mode)}],
+   "warnings": [text, ..],
    "baseline_seconds": float, "proven_commit": sha}
 
 sitting.json (written by the start skill's decision sitting):
@@ -201,7 +202,7 @@ def arm(a):
     ceiling = None if a.ceiling == "none" else int(a.ceiling)
     if ceiling is not None and not 0 <= ceiling <= 100:
         refuse(f"the ceiling must be 0 to 100, or none: {a.ceiling}")
-    failed = [c["name"] for c in prescan["checks"] if not c["ok"]]
+    failed = [c["name"] for c in prescan["checks"] if not c["ok"] and c.get("mode", a.mode) == a.mode]
     if failed:
         refuse(f"checks failed: {', '.join(failed)}")
     unanswered = [g["question"] for g in sitting["gaps"] if not (g.get("answer") or "").strip()]

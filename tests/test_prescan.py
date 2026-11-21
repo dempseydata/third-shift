@@ -9,6 +9,8 @@ from tests.test_shift import LEDGER, REPO, ROOT, SLUG, Target
 
 PRESCAN = ROOT / "cli" / "prescan"
 CRITERIA = "## Acceptance criteria\n\n- [ ] It runs\n"
+RULES = json.loads((ROOT / "cli" / "rules.json").read_text())
+RECIPE = "# Verify recipe\n\n## Launch\n\nStart it.\n"
 
 
 def ticket(n, labels=("ready-for-agent",), body=CRITERIA, state="open"):
@@ -16,7 +18,51 @@ def ticket(n, labels=("ready-for-agent",), body=CRITERIA, state="open"):
             "labels": [{"name": l} for l in labels]}
 
 
-class Prescan(Target):
+class PrescanTarget(Target):
+    """A target that passes every environment check (#31), the machine faked: HOME, and `uv`,
+    `pmset` and `npx` first on PATH; no tests."""
+    fixture = "prescan"
+
+    def prepare(self):  # a proven recipe: committed, then its Proven section names that commit
+        checks = self.target / "verify" / "checks"
+        checks.parent.mkdir()
+        checks.write_text('#!/bin/sh\nsleep "${FAKE_CHECKS_SLEEP:-0}"\nexit "${FAKE_CHECKS_EXIT:-0}"\n')
+        checks.chmod(0o755)
+        (self.target / "verify" / "recipe.md").write_text(RECIPE)
+        (self.target / "playwright.config.ts").write_text("export default {}\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "recipe")
+        proven = self.git("rev-parse", "HEAD")
+        (self.target / "verify" / "recipe.md").write_text(f"{RECIPE}\n## Proven\n\n{proven}: passed, failed on a break\n")
+        self.git("commit", "-qam", "proven")
+        self.git("push", "-q", "origin", "HEAD:main")
+
+    def setUp(self):
+        super().setUp()
+        self.user = self.tmp / "user"
+        self.settings = {"permissions": {"allow": RULES["allow"], "deny": RULES["deny"]},
+                         "enabledPlugins": {"third-shift@third-shift": True}, "model": "opus"}
+        self.browser = self.tmp / "ms-playwright" / "chromium-1"
+        self.browser.mkdir(parents=True)
+        (self.browser / "INSTALLATION_COMPLETE").touch()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.fake("uv", "echo uv 0.0.0")
+        self.fake("pmset", "echo \"Now drawing from 'AC Power'\"")
+        self.fake("npx", f"echo 'browser: chromium version 1'\necho '  Install location:    {self.browser}'")
+        self.gh_extra = {"auth": {"hosts": {"github.com": [
+                             {"state": "success", "active": True, "scopes": "project, repo"}]}},
+                         "graphql": {"Board": {"repository": {"id": "R", "owner": {"id": "O", "projectsV2": {
+                             "nodes": [{"title": "third-shift: widget"}]}}}}}}
+        env = {k: v for k, v in self.env.items() if k != "CLAUDE_CONFIG_DIR"}
+        self.env = {**env, "HOME": str(self.user),
+                    "PATH": os.pathsep.join([str(self.bin), env["PATH"]])}
+
+    def fake(self, name, script):
+        f = self.bin / name
+        f.write_text(f"#!/bin/sh\n{script}\n")
+        f.chmod(0o755)
+
     def tickets(self, *issues, blocked_by=None):
         """The spec #20 on the fake tracker with these sub-issues and native links."""
         api = {f"repos/{REPO}/issues/20": {"number": 20, "title": "Widget version 1"},
@@ -26,9 +72,12 @@ class Prescan(Target):
             api[f"repos/{REPO}/issues/{i['number']}"] = i
             api[f"repos/{REPO}/issues/{i['number']}/dependencies/blocked_by"] = [
                 {"number": b, "state": "open"} for b in (blocked_by or {}).get(i["number"], [])]
-        (self.gh / "fixture.json").write_text(json.dumps({"repo": REPO, "api": api}))
+        (self.gh / "fixture.json").write_text(json.dumps({"repo": REPO, "api": api, **self.gh_extra}))
 
     def run_prescan(self, env=None):
+        settings = self.user / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps(self.settings))
         out = self.tmp / "out" / "prescan.json"
         out.parent.mkdir(exist_ok=True)
         p = subprocess.run([sys.executable, str(PRESCAN), "--spec", "20", "--out", str(out)],
@@ -42,6 +91,10 @@ class Prescan(Target):
         self.assertEqual(code, 0, out)
         self.assertEqual(out["questions"], written["questions"])
         return written
+
+
+class Prescan(PrescanTarget):
+    fixture = "prescan"
 
     def test_writes_the_ticket_set_and_nothing_else(self):
         main = self.git("rev-parse", "HEAD")
@@ -148,9 +201,6 @@ class Prescan(Target):
         self.assertEqual(self.run_prescan()[0], 0)
 
     def test_its_output_arms_the_shift(self):
-        (self.target / "local").write_text("x")  # HEAD ahead: the base is still the default branch's
-        self.git("add", ".")
-        self.git("commit", "-qm", "local")
         self.tickets(ticket(21), ticket(22), ticket(23, ["ready-for-human"]),
                      ticket(24, state="closed"), blocked_by={22: [21]})
         code, out, p = self.run_prescan()

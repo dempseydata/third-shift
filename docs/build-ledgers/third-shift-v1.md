@@ -15,7 +15,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #27 | open (human-verified) | 03d43fc | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
 | #28 | closed | bf8427f | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope); first commit refused by denylist (fixture URL), issue closed before it landed, corrected |
 | #29 | closed | 3e2fd44 | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
-| #30 | closed | (this commit) | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
+| #30 | closed | 417282f | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
+| #31 | closed | (this commit) | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -27,9 +28,11 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
 - #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
 - #37: the guard refuses paths outside the repo, `/tmp` included, so the `done --comment` file (and any scratch file the loop writes) must live inside the repo in a path no commit takes, e.g. under `.git/` (from #27 review).
-- #31: fill prescan.json's `checks`, `baseline_seconds`, `proven_commit` and `warnings`; until then `checks` is empty and arm sees no failed check (from #30).
+- #31: ~~fill checks, baseline, Proven commit, warnings~~ — paid in #31.
 - #34: prescan `questions` are plain strings, each starting with its ticket number; arm never reads them, so the start skill must turn each into a sitting gap (from #30 review).
-- #31, #35: ADR 0006's single allow/deny rules file in `cli/` does not exist yet; the guard needed none. Whichever of #31/#35 lands first creates it (from #27).
+- #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
+- #35: write user settings from `cli/rules.json`; confirm its `uv run --script *cli/shift*` / `*cli/prescan*` allow patterns match how the skills actually call the scripts (from #31 review).
+- #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -99,6 +102,12 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #30: both triage labels, neither, a cycle, a self-edge, or a `## Blocked by` entry without a native link become questions; criteria accept `-`, `+`, `1.` and `1)` checkboxes and skip blank ones — ADR? no
 - #30: the prescan refuses while an unmerged `third-shift/<slug>` exists, local or remote (ADR 0005) — ADR? no
 
+- #31: the power check carries `mode: away`; arm skips a failed check for the other mode, and a battery in day mode is a warning — ADR? no (map #18)
+- #31: recipe unchanged = its `## Proven` section names a commit where the recipe (minus that section) and `playwright.config.*` match today — ADR? yes (a file format setup and the prescan share)
+- #31: the guard counts as active when any `third-shift@*` key in `enabledPlugins` is true; scopes read with `gh auth status --json`, `project` and `repo` required — ADR? no (ADR 0006, map #3)
+- #31: `verify/checks` is timed into the baseline, bounded at 600 s (`THIRD_SHIFT_CHECKS_TIMEOUT`); on timeout SIGTERM to the group, a grace period, then SIGKILL; chromium, ffmpeg and headless-shell must carry `INSTALLATION_COMPLETE` — ADR? no
+- #31: the push dry-run uses `--no-verify` so the target's pre-push hook never runs — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -137,3 +146,6 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #30: criteria after a `###` heading inside the criteria section are dropped
 - #30: a node between two cycles is named as "in" a cycle
 - #30: real gh pagination and the dependencies API shape unchecked
+- #31: when the settings `model` key is unset, the model warning appears on every run
+- #31: a webServer the Playwright runner never stops (detached, own group) is beyond the timeout's reach
+- #31: GH_TOKEN with a classic token not checked

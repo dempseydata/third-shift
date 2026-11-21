@@ -3,8 +3,8 @@
 Reads canned answers from $FAKE_GH_DIR/fixture.json:
   {"repo": "owner/name", "api": {"<api path>": <json>, ...},
    "graphql": {"<operation name>": <data>, ...}, "post": {"<api path>": <json>, ...},
-   "fail": ["<operation name or api path>", ...]}
-Serves GET `gh api <path>` (with `--jq .[]`
+   "fail": ["<operation name or api path>", ...], "auth": <`gh auth status --json hosts` answer>}
+Serves `gh auth status` (its canned "auth", or a failure if none), GET `gh api <path>` (with `--jq .[]`
 printing one compact element per line, as real gh does), and `gh api graphql` by the
 operation's name, as {"data": ...} ({} if not canned). A graphql query is a read; every other
 call is a write: it is appended to $FAKE_GH_DIR/writes.jsonl as its argument list and prints its
@@ -26,6 +26,12 @@ def fail(what):
     print(f"gh: HTTP 502: {what} failed", file=sys.stderr)
     sys.exit(1)
 
+
+if args[:2] == ["auth", "status"]:
+    if "auth" not in fixture:
+        fail("auth status")
+    print(json.dumps(fixture["auth"]))
+    sys.exit(0)
 
 if args[:2] == ["api", "graphql"]:
     query = next(a[6:] for a in args if a.startswith("query="))
