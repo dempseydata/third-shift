@@ -217,6 +217,18 @@ class Shift(Target):
         self.assertEqual(out["gen"], 1)
         self.assertEqual(self.writes(), [])
 
+    def test_arm_records_the_watchmans_task_id(self):  # ADR 0004: so end can remove it
+        code, out = self.arm("--watchman", "third-shift-acme-widget-2")
+        self.assertEqual(code, 0, out)
+        state = json.loads((self.home / "acme" / "widget" / "state.json").read_text())
+        self.assertEqual(state["watchman"], "third-shift-acme-widget-2")
+
+    def test_arm_refuses_a_blank_or_multi_line_watchman(self):
+        for task in ("", "  ", "a\nb", "a\n"):
+            code, out = self.arm("--watchman", task)
+            self.assert_refused(code)
+            self.assertIn("watchman", out["refused"])
+
     def assert_refused(self, code):
         self.assertEqual(code, 1)
         self.assertFalse((self.home / "acme").exists())

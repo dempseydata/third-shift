@@ -18,7 +18,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #30 | closed | 417282f | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
 | #31 | closed | 310ceb5 | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
 | #32 | closed | 5a9451f | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
-| #33 | open (human-verified) | (this commit) | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
+| #33 | open (human-verified) | 8b2becd | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
+| #34 | open (human-verified) | (this commit) | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -31,12 +32,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
 - #37: the guard refuses paths outside the repo, `/tmp` included, so the `done --comment` file (and any scratch file the loop writes) must live inside the repo in a path no commit takes, e.g. under `.git/` (from #27 review).
 - #31: ~~fill checks, baseline, Proven commit, warnings~~ — paid in #31.
-- #34: prescan `questions` are plain strings, each starting with its ticket number; arm never reads them, so the start skill must turn each into a sitting gap (from #30 review).
+- #34: ~~prescan questions → sitting gaps~~ — paid in #34.
 - #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
 - #35: write user settings from `cli/rules.json`; confirm its `uv run --script *cli/shift*` / `*cli/prescan*` allow patterns match how the skills actually call the scripts (from #31 review).
 - #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
 - #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
-- #34: no command takes the Prescan role's starting-cost guess (only `admit`/`step --begin` take `--guess`); and briefs have no rule for a missing `verify/recipe.md` (from #32 review).
+- #34: ~~Prescan usage; missing recipe~~ — paid in #34 (prescan usage not recorded, nothing is armed; a missing recipe fails `recipe proven`).
+- #38: the scheduled-task tool takes no working folder, so `start revive <owner/repo>` must find the target folder from runtime state.json's `target`; the watchman's task id is in state.json (`arm --watchman`) for removal at end (from #34 review).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -121,6 +123,10 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #33: cases allow read-only Read, Glob, Grep (listing is not a grant), with a `tool_used: Bash, max: 0, min: 0` guard; model per the role table; Haiku judge; 30 turns, 900 s — ADR? no
 - #33: the tool cannot express 2-of-3 / 3-of-3 pass marks; each case states its mark and the builder judges from per-run results; the first run is recorded in committed `evals/FROZEN.md`, raw output kept in ignored `local-data/` — ADR? no
 
+- #34: any failed check except mains power stops `start` before the prescan brief; the prescan step's usage is not recorded — ADR? no
+- #34: the sitting's ADRs and the watchman are made BEFORE arm (after arm the session's own prompts are denied); a refused arm deletes both; class/edge questions sit in sitting.json with `"adr": null` — ADR? yes (the start sequence is forced by the PermissionRequest deny)
+- #34: the watchman runs every 15 min with prompt `/third-shift:start revive <owner/repo>`, `notifyOnCompletion` false; the id the tool returns is stored via `arm --watchman <id>` (ADR 0004) — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -167,3 +173,4 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #33: wrong answers some regexes still pass (P1 "no gaps" listing the tickets; single-line P5/P6) — the rubric must catch them
 - #33: V1's evidence PNGs are 1×1 pixel
 - #33: how `plugin eval` combines regex and rubric graders into one run's pass is unchecked
+- #34: whether `update_scheduled_task` (used when a stale watchman id is in use) returns an id is unchecked

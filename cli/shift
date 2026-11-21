@@ -11,7 +11,8 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   setup-board --spec N   creates or finds the board `third-shift: <repo>` (ADR 0006), links it,
        lays out its columns, Spec and Why fields and the spec's view, and caches the ids in
        board.json in runtime state. Idempotent; run once per target and once per spec
-  arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none]
+  arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none] [--watchman <task id>]
+       --watchman records the watchman's scheduled-task id in runtime state (ADR 0004)
   next --gen N
   admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits
   step <ticket> --begin --gen N --role R READINGS   the usage gate at a later step boundary
@@ -202,6 +203,8 @@ def arm(a):
     ceiling = None if a.ceiling == "none" else int(a.ceiling)
     if ceiling is not None and not 0 <= ceiling <= 100:
         refuse(f"the ceiling must be 0 to 100, or none: {a.ceiling}")
+    if a.watchman is not None and (not a.watchman.strip() or a.watchman.splitlines() != [a.watchman]):
+        refuse(f"the watchman's task id must be one non-blank line: {a.watchman!r}")
     failed = [c["name"] for c in prescan["checks"] if not c["ok"] and c.get("mode", a.mode) == a.mode]
     if failed:
         refuse(f"checks failed: {', '.join(failed)}")
@@ -260,7 +263,7 @@ def arm(a):
         write_atomic(state_file, json.dumps({
             "armed": True, "gen": 1, "spec": spec["number"], "ledger": str(rel),
             "shift_state": "running", "since": now(),
-            "target": top}) + "\n")  # the heartbeat's claim checks the folder
+            "target": top, **({"watchman": a.watchman} if a.watchman else {})}) + "\n")  # the heartbeat's claim checks the folder
         commit_ledger(path, branch, f"ledger: #{spec['number']} armed")  # the push is last
     except Exception:  # leave nothing behind, so arm can run again
         subprocess.run(["git", "rm", "-q", "-f", "--cached", "--ignore-unmatch", "--",
@@ -1593,6 +1596,7 @@ def main():
     s.add_argument("--sitting", required=True)
     s.add_argument("--mode", required=True, choices=["day", "away"])
     s.add_argument("--ceiling", default=str(CEILING))
+    s.add_argument("--watchman")
     s = sub.add_parser("next")
     s.add_argument("--gen", type=int, required=True)
     for cmd in ("admit", "step"):

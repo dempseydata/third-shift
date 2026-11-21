@@ -1,54 +1,44 @@
 # Prescan
 
-Two parts: mechanical checks you run yourself, and a decision-gap scan run by one read-only subagent. Together they settle, before the first ticket, everything that would otherwise stop the shift at 2 a.m.
+Two halves. A read-only script runs every mechanical check and writes `prescan.json`; one read-only subagent, from the prescan brief, does the judgement: decision gaps and each criterion against the verify recipe. Together they settle, before arming, everything that would otherwise stop the shift at 2 a.m.
 
-## Prerequisites
+## 1. Read the project's rules
 
-- `docs/agents/issue-tracker.md` exists. If it doesn't, stop and tell the user to run `/setup-matt-pocock-skills` first.
-- Read it, then `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and the root `CLAUDE.md` or `AGENTS.md`. The project's own rules (visibility, hooks, paths that never enter git) come from these files, and every brief carries them.
+Read the target's root `CLAUDE.md` or `AGENTS.md`, `docs/agents/domain.md` (where ADRs live and their format) and `docs/agents/triage-labels.md`. The project's own rules (visibility, hooks, paths that never enter git) come from these, and every brief carries them as `{project_rules}`.
 
-## Mechanical checks
+## 2. Run the script
 
-Run every row. A failed row becomes a question for the sitting.
+```
+uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/prescan" --spec <n> --out .git/third-shift/prescan.json
+```
 
-| Check | How | Why it earns its place |
-| --- | --- | --- |
-| Clean start | The working tree is clean, on the default branch, level with its remote | The shift's first commit sits on a known base |
-| Guards hold | Hooks the project configures are active (`git config core.hooksPath`, `.githooks/`, husky). What `CLAUDE.md` claims they enforce, they do enforce | A guard claimed but missing fails silently until publication |
-| Ticket set | **GitHub:** the spec's sub-issues (`gh api repos/<owner>/<repo>/issues/<n>/sub_issues`), else its task list. **`.scratch`:** `.scratch/<feature>/issues/*.md` | The shift works the spec's tickets and nothing else |
-| Blocking edges | Per the tracker file's **Blocking** operation. Order the tickets topologically. A cycle is a question | The frontier needs them |
-| Agent, human-verified, or human | A `ready-for-human` label or `Status:` line makes a ticket **human**: the shift skips it. A `ready-for-agent` ticket whose building an agent can do, but some of whose criteria need a person to judge or run, is **human-verified**: the shift builds it and leaves it open (step 7). Otherwise it is **agent**. Unsure means ask. Criteria missing altogether means ask | Human work is excluded up front; human verification is scheduled, not discovered at the end |
-| Binding sources | Collect every ADR, closed issue, decision ticket and doc that the spec and tickets cite. Precedence: ADRs, then closed decision tickets, then the spec, then briefs and background only where the others are silent | Implementers who skip a decision ticket build against the wrong rule |
-| Tools | Every CLI and binary the spec or tickets name is installed (`command -v`) | A missing tool surfaces mid-ticket as a confusing failure |
-| Baseline suite | Find the test command. It passes. Record the test count and duration. No suite means ask | Red-to-green needs a green start; duration growth needs a baseline |
+- **Refused** (exit 1: no sub-issues, an unmerged `third-shift/<spec-slug>` branch, an unreadable tracker): show the `refused` text and stop. Nothing was written.
+- **Done**: read `.git/third-shift/prescan.json` (its shape is documented at the top of `cli/shift`).
 
-## Decision-gap scan
+## 3. Failed checks stop the start
 
-Spawn one foreground subagent with the prescan brief from [briefs.md](briefs.md).
+Each entry in `checks` has `name`, `ok` and `detail`; a failed one's detail ends with `run /third-shift:setup`. Arm refuses on any failed check, so a failed check is not a sitting question:
 
-The heuristic: a gap is almost always a **contract**. Something one ticket produces is consumed by another ticket, by a user, or by another program, and no binding source fixes its shape. Look for:
+- Any failed check other than `mains power`: show every failed check with its detail and stop before the brief. The builder runs `/third-shift:setup` and starts again.
+- This covers a target with no `verify/recipe.md`: the `recipe proven` check fails and names setup, so the prescan brief, which reads the recipe, never runs without one.
+- `mains power` carries `"mode": "away"`: failed, it only takes away mode off the sitting.
 
-- CLI commands, arguments, flags, and the tool's own name (watch for collisions such as a command sharing the tool's name);
-- machine-readable output fields and exit codes;
-- file and folder layouts and names, and which paths are gitignored;
-- file formats one ticket writes and another reads;
-- config and pack keys that a later ticket must follow;
-- URL, query-string or DOM attribute contracts between components;
-- where a deliverable lives and how it is installed;
-- places where two binding sources contradict each other.
+## 4. Collect the binding sources
 
-For each gap, the scan returns:
-- the question;
-- the producing and consuming tickets;
-- two or three options, with a recommendation;
-- why the choice is hard to reverse.
+Every ADR in the target, every closed issue or decision ticket the spec and its tickets cite, the spec itself, and the docs they point to. Precedence: ADRs, then closed decision tickets, then the spec, then everything else only where those are silent. This list fills the brief's `{sources}` and becomes sitting.json's `binding_sources`.
 
-Easy-to-reverse choices are not gaps. Implementers make those and record them.
+## 5. Spawn the prescan brief
 
-## Report
+One fresh foreground subagent from the Prescan brief in [briefs.md](briefs.md), with the Prescan row of its role table (`model: opus`, effort high). Fill `{spec}`, `{sources}` and `{tickets}` (from prescan.json; paste, never a path into this skill). If it comes back in the background, wait for its completion notice before going on.
 
-Present these to the user, then move to the sitting:
-- the ticket table: order, class (agent, human-verified or human), blocking edges;
+Its usage is not recorded: no shift is armed yet, so there is no ledger to cost it against and no gate to pass (`admit` and `step` need an armed shift), and the builder is at the Mac. The role table's Prescan starting cost is a guess kept for reference only.
+
+## 6. Report
+
+Show the builder, then move to the sitting:
+
+- the ticket table: number, title, state, class (from the label and the brief), native blocking edges;
 - the binding sources, in precedence order;
-- each check's result;
-- the gaps, each with its recommendation.
+- each check's result, and prescan.json's `warnings`;
+- the baseline (`baseline_seconds`) and the recipe's Proven commit;
+- prescan.json's `questions`, and the brief's gaps, each with its recommendation.
