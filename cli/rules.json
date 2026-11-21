@@ -8,6 +8,7 @@
     "Bash(git status *)",
     "Bash(git diff *)",
     "Bash(git log *)",
+    "Bash(git rev-parse *)",
     "Bash(git add *)",
     "Bash(git commit *)",
     "Bash(git switch *)",
@@ -17,7 +18,11 @@
     "Bash(gh issue comment *)",
     "Bash(gh issue close *)",
     "Bash(gh issue edit *)",
-    "Bash(verify/checks)"
+    "Bash(verify/checks)",
+    "Bash(./verify/checks)",
+    "Bash(npx playwright test *)",
+    "Bash(playwright-cli *)",
+    "Bash(mkdir -p .git/third-shift*)"
   ],
   "deny": [
     "Bash(git push *--force*)",

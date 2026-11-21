@@ -56,6 +56,17 @@ class Settings(unittest.TestCase):
                                                               False))
         self.assertEqual(self.file.read_text(), written)
 
+    def test_an_extra_allow_rule_for_the_targets_test_command_is_added_once(self):
+        rule = "Bash(npm test*)"
+        code, show = self.run_settings("--allow", rule)
+        self.assertEqual((code, show["add"]["allow"]), (0, RULES["allow"] + [rule]), show)
+        self.assertFalse(self.file.exists())
+        code, wrote = self.run_settings("--write", "--allow", rule)
+        self.assertEqual((code, wrote["written"]), (0, True), wrote)
+        self.assertEqual(json.loads(self.file.read_text())["permissions"]["allow"][-1], rule)
+        code, again = self.run_settings("--write", "--allow", rule)
+        self.assertEqual((code, again["add"]["allow"], again["written"]), (0, [], False))
+
     def test_no_settings_file_is_created(self):
         code, r = self.run_settings("--write")
         self.assertEqual((code, r["written"]), (0, True))

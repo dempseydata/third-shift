@@ -15,6 +15,11 @@ BLOCK = "block"
 class Stopping(Clock, Working):
     """Helpers, no tests."""
 
+    def setUp(self):
+        super().setUp()
+        if "step" in self.runtime():  # admit started the implementer: end it, between steps
+            self.assertEqual(self.step()[0], 0)
+
     def stop(self, session="s1", minutes=0, **hook):
         hook = {"session_id": session, "cwd": str(self.target), "hook_event_name": "Stop",
                 "stop_hook_active": False, "last_assistant_message": "Done for now.", **hook}
@@ -114,6 +119,7 @@ class StopGate(Stopping):
         self.assertEqual(self.shift("next", "--gen", "1")[0], 0)
         self.issue_body(22, "## Acceptance criteria\n\n- [ ] It flies\n")
         self.assertEqual(self.admit(22)[0], 0)
+        self.assertEqual(self.step(n=22)[0], 0)
         self.blocked()
         self.blocked()
         reason = self.blocked()  # the third stall in a row: told once that the shift has ended

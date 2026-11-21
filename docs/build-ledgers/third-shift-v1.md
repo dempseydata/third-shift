@@ -21,7 +21,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #33 | open (human-verified) | 8b2becd | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
 | #34 | open (human-verified) | 7b5779f | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
 | #35 | open (human-verified) | 2636a6b | 1 | 220 tests, 72 s | setup skill (per machine), cli/settings; live-only; round-1 fix checked by the orchestrator |
-| #36 | open (human-verified) | (this commit) | 1 | 228 tests, 70 s | setup per target: board, pin, recipe drafts, proof in a scratch copy, cli/recipe; live-only; round-1 fix checked by the orchestrator |
+| #36 | open (human-verified) | 059562b | 1 | 228 tests, 70 s | setup per target: board, pin, recipe drafts, proof in a scratch copy, cli/recipe; live-only; round-1 fix checked by the orchestrator |
+| #37 | open (human-verified) | (this commit) | 4 | 240 tests, 70 s | the shift loop (loop.md), `ceiling`, running steps, resume_cron, inline done JSON; 3 rounds + one small round per the rules; round-4 checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -32,16 +33,16 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
 - #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
-- #37: the guard refuses paths outside the repo, `/tmp` included, so the `done --comment` file (and any scratch file the loop writes) must live inside the repo in a path no commit takes, e.g. under `.git/` (from #27 review).
+- #37: ~~scratch location~~ — paid in #37, superseded: after arm no Claude tool writes scratch files (`.git` is a protected path); `done --comment` takes inline JSON.
 - #31: ~~fill checks, baseline, Proven commit, warnings~~ — paid in #31.
 - #34: ~~prescan questions → sitting gaps~~ — paid in #34.
 - #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
 - #35: ~~settings from cli/rules.json; allow patterns match~~ — paid in #35.
 - #36: ~~Proven section format~~ — paid in #36 (`cli/recipe proven`, tested against the real prescan check).
-- #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
+- #37: ~~evidence path → permalink~~ — paid in #37.
 - #34: ~~Prescan usage; missing recipe~~ — paid in #34 (prescan usage not recorded, nothing is armed; a missing recipe fails `recipe proven`).
 - #38: the scheduled-task tool takes no working folder, so `start revive <owner/repo>` must find the target folder from runtime state.json's `target`; the watchman's task id is in state.json (`arm --watchman`) for removal at end (from #34 review).
-- later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
+- #37: ~~mid-shift ceiling waiver~~ — paid in #37 (`ceiling --gen N <N|none>`).
 
 ## Decisions
 - #21: spec slug is `<number>-<slugified title>` (bare number if the title slugs to nothing); ledger `docs/third-shift-ledger/<slug>.json` + `.md`; branch `third-shift/<slug>` — ADR? yes (hard to reverse: names the target's files and branch)
@@ -138,6 +139,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #36: `cli/recipe pin` picks the newest released `@playwright/test` whose chromium is installed (assumes revisions grow with versions); setup asks for a spec number for setup-board; drafts `e2e/setup.spec.ts` as the proving test — ADR? no
 - #36: the deliberate break runs in an rsync copy under `.git/third-shift/prove` (map #16: a scratch copy), removed on every path; Proven is recorded only when this run proved it — ADR? no
 
+- #37: `step --begin` (and `admit` on proceed) mark a step running in runtime state; while set, stop-check allows stops and counts nothing toward a stall; the step record, `leave` and `revive` clear it — ADR? yes (how the Stop gate coexists with backgrounded subagents)
+- #37: `wait` refuses only while the frontier is non-empty; Backlog behind Needs you does not block waiting — ADR? no
+- #37: gate answers carry `resume_cron` (local time, reset + 3 min) and `now`, so the loop runs no `date`/`python -c`; resumes use a one-off CronCreate (session-only, fires when idle) — ADR? no
+- #37: after arm no Claude tool writes under `.git/` (protected path, prompts refused); `done --comment` takes inline single-quoted JSON, or `-`/a file — ADR? yes (supersedes #32's post-arm scratch convention)
+- #37: blockers and stalls set work aside on named refs; a released ticket is rebuilt from scratch; "retry" is a short pause plus timer; a `not met` verdict spends a fix round; two failed spawns stall a ticket; `--tokens 0` when none reported — ADR? no
+- #37: rules.json gains `git rev-parse *`, `mkdir -p .git/third-shift*`, `npx playwright test*`, `playwright-cli*`, `./verify/checks`; setup step 13 adds the target's own test and launch commands via `cli/settings --allow` — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -188,3 +196,6 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #35: a dangling settings symlink creates the folder it points to
 - #36: a rerun after a failed proof refuses because of setup's own uncommitted drafts
 - #36: whether `blockWritesOutsideWorkingDirectories` blocks npm's cache writes is unchecked
+- #37: a `> report.json` redirect after `npx playwright test` still prompts in default permission mode (Edit check on the target)
+- #37: whether `get_usage` (an MCP tool) prompts mid-shift is unverified
+- #37: whether the Stop hook fires while a background agent runs is unverified live

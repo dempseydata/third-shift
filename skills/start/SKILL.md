@@ -14,7 +14,7 @@ A **shift** is one unattended run over one spec's tickets, from prescan to hando
 Run everything from the target repo's folder. Two rules hold throughout:
 
 - Scripts run only as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/<script>" ...`, never from PATH. Each prints one JSON object: exit 0 done, 1 refused (`refused` says why), 2 lease lost (stop at once).
-- Scratch files live under `.git/third-shift/` in the target, never `/tmp` or anywhere outside the repo: the shift's guard refuses those paths, and nothing under `.git/` is committed. Create the folder with `mkdir -p .git/third-shift` if it is missing.
+- Before arm, scratch files live under `.git/third-shift/` in the target, never `/tmp` or anywhere outside the repo: the shift's guard refuses those paths, and nothing under `.git/` is committed. Create the folder with `mkdir -p .git/third-shift` if it is missing. After arm, no Claude tool writes scratch files at all: see [loop.md](references/loop.md)'s no-scratch-files rule.
 
 ## 1. Prescan
 
@@ -55,7 +55,7 @@ Done when every gap has an answer, mode, ceiling and end state are explicit, and
 
 ## 3. Arm
 
-Arming hands this session the lease, and from the first hook after it every permission prompt is refused. So the ADRs and the watchman are made first, and after arm only `git add`, `git commit` and `git push origin third-shift/*` remain.
+Arming hands this session the lease, and from the first hook after it every permission prompt is refused. So the ADRs and the watchman are made first: after arm, only the commands in `cli/rules.json`'s allow list run (the state script, read-only git, `git add`, `git commit`, `git push origin third-shift/*`, `gh issue` reads and writes, `verify/checks`, Playwright runs, and the target's test and launch commands that setup added), and everything else is refused.
 
 1. Write one ADR per decision gap at the path sitting.json gives it: the question, the options, the builder's answer and why, in the target's ADR format. Leave them uncommitted: they carry over onto the shift branch.
 2. Create the watchman with the desktop app's scheduled tasks (`create_scheduled_task`): `taskId` `third-shift-<owner>-<repo>` (lower case), `cronExpression` `*/15 * * * *`, `prompt` exactly `/third-shift:start revive <owner/repo>`, `description` `Revives the third-shift shift on <owner/repo> if it has died`, `notifyOnCompletion` false. If the id is refused as in use, a previous shift's watchman was never removed: update that task to this schedule and prompt instead of creating a second. Keep the task id the result gives, which may differ from the one asked for.
@@ -84,8 +84,14 @@ Done when arm answered ok, the ADRs are pushed on the shift branch, and the watc
 
 ## 4. Shift
 
-Written by ticket #37: the loop from `next` to `end`, starting with the `gen` and `branch` arm returned.
+Unattended from here: the builder answers only through Remote Control, and only the shift's own commands run. With the `gen` and `branch` arm (or revive) returned, run [references/loop.md](references/loop.md): `next`, `admit`, then for each ticket a fresh implementer, a separate reviewer, up to three fix rounds and a separate verifier, each step gated on usage and recorded with `step`; one `#<n>: <title>` commit per closed ticket and `done` with its criteria table; blockers to Needs you; `wait` when only Needs you or Stalled tickets are left.
+
+Done when the loop reaches the [Handover](#handover), or a command exits 2 (the lease is lost: stop at once).
 
 ## Revive
 
-Written by ticket #38: `start revive <owner/repo>` (`is-dead` first, then `revive`, then the [Shift](#4-shift)) and the handover. Until it is, stop and say that revival is not built yet.
+Written by ticket #38: `start revive <owner/repo>` (`is-dead` first, then `revive`, then the [Shift](#4-shift)). Until it is, stop and say that revival is not built yet.
+
+## Handover
+
+Written by ticket #38: `end` with the security-preflight findings and the ADR candidates, the watchman's removal and the end notification. Until it is, run `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" end --gen <gen> --reason "<reason>"`, send one push notification `third-shift <owner/repo>: shift ended: <reason>`, and stop.

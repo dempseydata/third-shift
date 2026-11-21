@@ -6,7 +6,8 @@
 """Adds cli/rules.json's allow list and deny rules, and its `set` permissions keys, to user
 settings (ADR 0006), for `setup`.
 
-Run as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/settings" [--write]`. User settings are
+Run as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/settings" [--write] [--allow RULE ..]`;
+--allow adds a rule to the allow list, for the target's own test command (map #4). User settings are
 $CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json, as the prescan reads them.
 Without --write it changes nothing and shows what --write would add. Prints one JSON object:
 {"ok": true, "settings": file, "add": {"allow": [..], "deny": [..], "set": {key: value}},
@@ -33,9 +34,11 @@ def out(obj, code=0):
 def main():
     p = argparse.ArgumentParser(prog="settings")
     p.add_argument("--write", action="store_true", help="add the missing rules")
+    p.add_argument("--allow", action="append", default=[], help="an extra allow rule")
     a = p.parse_args()
     path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "settings.json"
     rules = json.loads(Path(__file__).with_name("rules.json").read_text())
+    rules["allow"] += [r for r in a.allow if r not in rules["allow"]]
     try:
         settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, ValueError) as e:

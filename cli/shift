@@ -14,19 +14,24 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none] [--watchman <task id>]
        --watchman records the watchman's scheduled-task id in runtime state (ADR 0004)
   next --gen N
-  admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits
-  step <ticket> --begin --gen N --role R READINGS   the usage gate at a later step boundary
+  admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits; the
+       implementer step is then running, as after step --begin; needs-you and stall end it
+  step <ticket> --begin --gen N --role R READINGS   the usage gate at a later step boundary; on
+       proceed the step is running (runtime state `step`) until its record below
   step <ticket> --gen N --role R --round K --model M --effort E --before-5h P --before-weekly P
-       --after-5h P --after-weekly P --start ISO --end ISO --tokens T --outcome TEXT
+       --after-5h P --after-weekly P --start ISO [--end ISO] --tokens T --outcome TEXT
+       --end defaults to now; --start is the `now` that admit or step --begin answered
   pause --gen N --reason usage|owner --until ISO   (the reset time)
   resume --gen N
-  done <ticket> --gen N --comment <file>   file: [{"criterion", "verdict", "evidence_url"}]
+  ceiling --gen N <N|none>   raises or waives the weekly ceiling mid-shift (map #6)
+  done <ticket> --gen N --comment <json|file|->   inline, file or stdin: [{"criterion", "verdict", "evidence_url"}]
   needs-you <ticket> --gen N --reason blocker|human-verify|human|"set aside after a crash" --why W
-  stall <ticket> --gen N --why W
+  stall <ticket> --gen N --why W   needs-you and stall set uncommitted work aside on
+       refs/third-shift/<spec-slug>/<needs-you|stalled>-<n>-<k> and reset the tree
   release <ticket> --gen N [--decision D]
   note decision|owed|nit <ticket> --gen N --text T [--for <later ticket>]   --for only, and
        always, for owed
-  wait --gen N
+  wait --gen N   refused while the frontier (Ready, In progress, unblocked Backlog) is not empty
   end --gen N --reason R [--findings <file>] [--candidates <file>]   writes the handover
        beside the ledger (<spec-slug>.handover.md) from the ledger, the tracker's sub-issues and
        the two files (security-preflight's findings; the ADR candidates, the model's view, as
@@ -35,7 +40,7 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   heartbeat   the hook's entry point (hooks/hooks.json): reads the hook's JSON on stdin; the
        first hook after arm or revive claims the lease for its session_id (ADR 0004)
   stop-check  the Stop hook's entry point: prints only the hook's decision, {} to let the session
-       stop or {"decision": "block", "reason"}; three blocked stops without a ledger change stall
+       stop or {"decision": "block", "reason"}; a running step allows the stop; three blocked stops without a ledger change stall
        the ticket in progress (work set aside on refs/third-shift/<spec-slug>/stalled-<n>-<k>);
        three stalled tickets in a row end the shift. Any failure exits 1, which Claude Code
        treats as a non-blocking error: the gate fails open, and the watchman is the backstop
@@ -57,8 +62,9 @@ READINGS, from the desktop app's usage tool (whole percent used):
   --unreadable --guess G                                     when the tool did not answer
   --guess is the role's starting cost from the role table, used until the role has steps.
 The gate answers {"gate": "proceed"|"pause-until"|"retry"|"end", "reason", "until",
-"retry_in_minutes", "estimate": {"points", "guess"}}; `step --begin` exits 0 with any answer,
-`admit` exits 1 (refused) with any answer but proceed.
+"retry_in_minutes", "resume_cron", "estimate": {"points", "guess"}}; `step --begin` exits 0 with
+any answer, `admit` exits 1 (refused) with any answer but proceed. resume_cron (with until, and
+in pause's answer) is the one-off local-time cron for until plus 3 minutes.
 
 prescan.json (written by cli/prescan):
   {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
@@ -393,7 +399,7 @@ def gate(a, repo, ledger, role, limit):
                                           "gate_end": why}) + "\n")
         return {"gate": "end", "reason": why}
     if state["shift_state"] == "paused":
-        return {"gate": "pause-until", "until": state["until"],
+        return {"gate": "pause-until", "until": state["until"], "resume_cron": cron(state["until"]),
                 "reason": f"the shift is paused until {state['until']}"}
     failures = state.get("unreadable", 0) + 1 if a.unreadable else 0
     if failures != state.get("unreadable", 0):
@@ -401,7 +407,9 @@ def gate(a, repo, ledger, role, limit):
     if a.unreadable:
         if failures >= UNREADABLE_LIMIT:
             return end(f"usage unreadable {failures} times in a row")
-        return {"gate": "retry", "retry_in_minutes": RETRY_MINUTES, "reason": "usage unreadable"}
+        until = (datetime.fromisoformat(now()) + timedelta(minutes=RETRY_MINUTES)).isoformat()
+        return {"gate": "retry", "retry_in_minutes": RETRY_MINUTES, "until": until,
+                "resume_cron": cron(until), "reason": "usage unreadable"}
     ceiling, weekly = ledger["opening"]["ceiling"], max(a.weekly)
     if ceiling is not None and weekly >= ceiling:
         return end(f"weekly usage {weekly}% reached the ceiling {ceiling}%")
@@ -414,7 +422,8 @@ def gate(a, repo, ledger, role, limit):
         why = f"5-hour usage {a.five_hour}% plus a {role} step of {estimate['points']} reaches 100%"
     else:
         return {"gate": "proceed", "estimate": estimate}
-    return {"gate": "pause-until", "until": a.reset, "reason": why, "estimate": estimate}
+    return {"gate": "pause-until", "until": a.reset, "resume_cron": cron(a.reset), "reason": why,
+            "estimate": estimate}
 
 
 def admit(a):
@@ -435,7 +444,11 @@ def admit(a):
                  why="its acceptance criteria changed after the prescan froze them")
         event = "needs you"
     save(path, ledger, f"ledger: #{a.ticket} {event}")
-    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"],
+    if event == "admitted":  # the implementer step is running, as after `step --begin`
+        state_file = runtime(repo)
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "step": {
+            "ticket": a.ticket, "role": "implementer", "started": now()}}) + "\n")
+    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"], "now": now(),
          **mirror(repo, path, ledger)})
 
 
@@ -446,10 +459,17 @@ RECORD = ("round", "model", "effort", "outcome", "before_5h", "before_weekly", "
 def step(a):
     repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
+    state_file = runtime(repo)
     if a.begin:  # an admitted ticket's later steps may use the reserve
         o = ledger["opening"]
-        out({"ok": True, "ticket": a.ticket, **gate(a, repo, ledger, a.role,
-                                                    o["threshold"] + o["reserve"])})
+        g = gate(a, repo, ledger, a.role, o["threshold"] + o["reserve"])
+        state = json.loads(state_file.read_text())  # the gate may have written it
+        state.pop("step", None)
+        if g["gate"] == "proceed":  # stop-check lets a session waiting on the spawn stop
+            state["step"] = {"ticket": a.ticket, "role": a.role, "started": now()}
+        write_atomic(state_file, json.dumps(state) + "\n")
+        out({"ok": True, "ticket": a.ticket, **g, "now": now()})
+    a.end = a.end or now()  # the loop has no clock of its own: prompts are refused after arm
     missing = [f"--{f.replace('_', '-')}" for f in RECORD if getattr(a, f) is None]
     if missing:
         refuse(f"a step record needs {', '.join(missing)}")
@@ -465,13 +485,18 @@ def step(a):
         **({"points": points} if points >= 0 else {"points": a.after_5h, "lower_bound": True})})
     t["usage"] = t.get("usage", 0) + ledger["steps"][-1]["points"]
     save(path, ledger, f"ledger: #{a.ticket} step")
+    state = json.loads(state_file.read_text())
+    if state.get("step", {}).get("ticket") == a.ticket and state["step"]["role"] == a.role:
+        state.pop("step")
+        write_atomic(state_file, json.dumps(state) + "\n")
     out({"ok": True, "step": ledger["steps"][-1], **mirror(repo, path, ledger)})
 
 
 def done(a):
     repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
-    rows = json.loads(Path(a.comment).read_text())
+    c = a.comment  # inline JSON (one argument, so one permission-matched command), "-" or a file
+    rows = json.loads(c if c.startswith("[") else sys.stdin.read() if c == "-" else Path(c).read_text())
     frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
     if not frozen:
         refuse(f"#{a.ticket} has no frozen criteria to close against")
@@ -509,17 +534,31 @@ def done(a):
 def needs_you(a):
     repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
-    t.update(state="Needs you", reason=a.reason, why=a.why)
-    save(path, ledger, f"ledger: #{a.ticket} needs you")
+    leave(path, ledger, a.ticket, "needs you", state="Needs you", reason=a.reason, why=a.why)
     out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
 
 
 def stall(a):
     repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
-    t.update(state="Stalled", why=a.why)
-    save(path, ledger, f"ledger: #{a.ticket} stalled")
+    leave(path, ledger, a.ticket, "stalled", state="Stalled", why=a.why)
     out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
+
+
+def leave(path, ledger, n, event, **update):
+    """Move ticket n out of In progress, its uncommitted work set aside on a named ref."""
+    t = ledger["tickets"][str(n)]
+    ref = set_aside(path, f"{event.replace(' ', '-')}-{n}-{len(t.get('set_aside', [])) + 1}",
+                    f"third-shift: #{n} {event}")
+    t.update(update)
+    if ref:
+        t.setdefault("set_aside", []).append(ref)
+    save_aside(path, ledger, f"ledger: #{n} {event}", ref)
+    state_file = runtime(ledger["opening"]["repo"])  # its running step, if any, ends with it
+    state = json.loads(state_file.read_text())
+    if state.pop("step", None):
+        write_atomic(state_file, json.dumps(state) + "\n")
+    return ref
 
 
 def release(a):
@@ -557,12 +596,21 @@ def wait(a):
     state = json.loads(state_file.read_text())
     if state["shift_state"] != "running":
         refuse(f"the shift is {state['shift_state']}, not running")
-    moving = [f"#{n} is {t['state']}" for n, t in ledger["tickets"].items()
-              if t["state"] not in ("Needs you", "Stalled", "Done")]
+    moving = remaining(ledger)  # Backlog behind a Needs you ticket waits with it
     if moving:
         refuse(f"tickets can still move: {', '.join(moving)}")
     write_atomic(state_file, json.dumps({**state, "shift_state": "waiting"}) + "\n")
     out({"ok": True, "shift_state": "waiting", **mirror(repo, path, ledger)})
+
+
+def ceiling(a):
+    """Raise or waive the weekly ceiling mid-shift (map #6, decision 5)."""
+    repo, path, ledger = load(a.gen)
+    o = ledger["opening"]
+    ledger.setdefault("ceilings", []).append({"from": o["ceiling"], "ceiling": a.value, "at": now()})
+    o["ceiling"] = a.value
+    save(path, ledger, f"ledger: #{o['spec']['number']} ceiling")
+    out({"ok": True, "ceiling": a.value, **mirror(repo, path, ledger)})
 
 
 def pause(a):
@@ -575,7 +623,8 @@ def pause(a):
     save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} paused")
     write_atomic(state_file, json.dumps({**state, "shift_state": "paused", "until": a.until,
                                       "pause": a.reason}) + "\n")
-    out({"ok": True, "shift_state": "paused", "until": a.until, **mirror(repo, path, ledger)})
+    out({"ok": True, "shift_state": "paused", "until": a.until, "resume_cron": cron(a.until),
+         **mirror(repo, path, ledger)})
 
 
 def resume(a):
@@ -590,6 +639,13 @@ def resume(a):
     state.pop("pause", None)
     write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
     out({"ok": True, "shift_state": "running", **mirror(repo, path, ledger)})
+
+
+def cron(until):
+    """A one-off 5-field cron at `until` plus 3 minutes, in this machine's local time (TZ),
+    for CronCreate: the loop cannot run a converter after arm."""
+    t = (datetime.fromisoformat(until) + timedelta(minutes=3)).astimezone()
+    return f"{t.minute} {t.hour} {t.day} {t.month} *"
 
 
 def now():
@@ -1013,19 +1069,14 @@ def stop_check(a):
             out({"decision": "block", "reason": f"{moved}The shift has ended: {why}. Hand over; "
                  "then stop."})  # told once: the shift is disarmed, so the next stop is free
     row()
-    if state["shift_state"] in ("paused", "waiting"):
-        out({})
+    if state["shift_state"] in ("paused", "waiting") or "step" in state:
+        out({})  # a running step: its tool calls beat, and its completion notice wakes the session
     count = state.get("stops", {}).get("ledger") == fingerprint(path) and state["stops"]["count"]
     count = (count or 0) + 1
     busy = next((n for n, t in ledger["tickets"].items() if t["state"] == "In progress"), None)
     if busy and count >= STOPS:
-        t = ledger["tickets"][busy]
-        ref = set_aside(path, f"stalled-{busy}-{len(t.get('set_aside', [])) + 1}",
-                        f"third-shift: #{busy} stalled")
-        t.update(state="Stalled", why=f"{STOPS} blocked stops in a row without progress")
-        if ref:
-            t.setdefault("set_aside", []).append(ref)
-        save_aside(path, ledger, f"ledger: #{busy} stalled", ref)
+        ref = leave(path, ledger, busy, "stalled", state="Stalled",
+                    why=f"{STOPS} blocked stops in a row without progress")
         count, moved = 0, (f"#{busy} stalled after {STOPS} stops in a row without progress"
                            + (f"; its uncommitted work is set aside on {ref}" if ref else "") + ". ")
         row(moved)
@@ -1534,7 +1585,7 @@ def revive(a):
     # spec: restart the ticket from its last commit
     save_aside(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} revived", ref)
     retired = [*state.get("retired", []), *([state["session_id"]] if "session_id" in state else [])]
-    state = {k: v for k, v in state.items() if k not in ("session_id", "until", "pause", "gate_end")}
+    state = {k: v for k, v in state.items() if k not in ("session_id", "until", "pause", "gate_end", "step")}
     write_atomic(state_file, json.dumps({**state, "gen": gen, "revivals": revivals, "since": now(),
                                       "retired": retired,  # the next hook, never these, claims
                                       "shift_state": "running"}) + "\n")
@@ -1563,6 +1614,13 @@ def percent(v):
     if not 0 <= int(v) <= 100:
         raise ValueError(v)
     return int(v)
+
+
+def ceiling_value(v):
+    return None if v == "none" else percent(v)
+
+
+ceiling_value.__name__ = "ceiling 0 to 100, or none"
 
 
 def text(v):
@@ -1642,6 +1700,9 @@ def main():
     s.add_argument("--until", required=True, type=zoned)
     s = sub.add_parser("resume")
     s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("ceiling")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("value", type=ceiling_value)
     s = sub.add_parser("wait")
     s.add_argument("--gen", type=int, required=True)
     s = sub.add_parser("end")
@@ -1658,7 +1719,7 @@ def main():
     try:
         {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,
          "needs-you": needs_you, "stall": stall, "release": release, "note": note,
-         "pause": pause, "resume": resume, "wait": wait, "end": end, "heartbeat": heartbeat,
+         "pause": pause, "resume": resume, "ceiling": ceiling, "wait": wait, "end": end, "heartbeat": heartbeat,
          "stop-check": stop_check, "is-dead": is_dead, "revive": revive, "guard": guard,
          "deny-prompt": deny_prompt, "refused": refused, "setup-board": setup_board}[a.cmd](a)
     except subprocess.CalledProcessError as e:

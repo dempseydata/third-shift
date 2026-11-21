@@ -17,6 +17,7 @@ class Gated(Armed):
     def gate(self, *readings, role="implementer"):
         code, out = self.begin(*readings, role=role)
         self.assertEqual((code, out.pop("ok"), out.pop("ticket")), (0, True, 21), out)
+        out.pop("now"), out.pop("resume_cron", None)  # tests.test_loop.ResumeCron covers them
         return out
 
     def record(self, before, after, role="implementer"):

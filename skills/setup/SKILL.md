@@ -121,9 +121,9 @@ Three pieces make a target verifiable (map #7, #16). Keep each one the target al
 - **The Playwright config**, `playwright.config.ts` (or the target's language): tests in `e2e/`; a `webServer` that builds the app and starts it on a fixed port of its own, with `reuseExistingServer: false` so evidence never describes other code; chromium only; a JSON reporter beside the list reporter. Add a `test:e2e` script (`playwright test`) to `package.json`, and `test-results/` and `playwright-report/` to `.gitignore`, or every run dirties the tree and the prescan's clean-start check fails.
 - **The checks script**, `verify/checks`, executable: `#!/bin/sh` with `set -e`, then everything the target already checks model-free (lint, type check, unit tests, whichever exist) and `npm run test:e2e`. It exits 0 on pass. The prescan times it as the shift's baseline and refuses a run over 10 minutes.
 - **The verify recipe**, `verify/recipe.md`, the verifier's instructions (map #7), its sections in this order:
-  - **Launch**: refuse if the config's port is taken, start the app the way the config does, poll until it answers.
+  - **Launch**: refuse if the config's port already answers to `playwright-cli`, start the app the way the config does in the background, poll with `playwright-cli` until it answers. No `curl`, `lsof` or `kill`: a shift's allow list does not carry them.
   - **Drive**: explore with `playwright-cli`; find a region by its role, or by its visible label when it has none; read app code to learn how a term looks on the page, never edit it.
-  - **Clean up**: stop the app and close the browser before any model-free run, which needs the same port.
+  - **Clean up**: stop the app's background task and close the browser before any model-free run, which needs the same port.
   - **Evidence**: one test per criterion, `e2e/<ticket>-<k>.spec.ts`, titled with the criterion's THEN clause, one `expect` per thing it names, data read from the fixture at run time, one screenshot saved to `verify/evidence/<ticket>/<k>.png`; run with `npx playwright test <file> --reporter=json`, report saved as `verify/evidence/<ticket>/report.json` with machine paths stripped.
   - No `## Proven` section: step 11 writes it.
 
@@ -163,6 +163,16 @@ uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/recipe" proven
    It writes `## Proven` at the end of the recipe and reads it back with the prescan's own check; a refusal means the files at HEAD are not the ones proven: show it and stop. Commit the recipe as `third-shift: setup proven`. The Proven commit cannot name the commit that carries it, so the proof is its own commit after the files (#31).
 3. Nothing committed in 1–2: nothing to push; say so.
 4. Otherwise show the commits and ask to push. On yes, `git push origin HEAD:<default branch>`. If GitHub refuses it as a protected branch (or a ruleset), push the same commits to `third-shift/setup` instead and open a pull request with `gh pr create --base <default branch> --head third-shift/setup --title "third-shift: setup"`. Tell the builder to merge it **with a merge commit, never squash or rebase**, which would drop the Proven commit from the default branch, and to rerun `/third-shift:setup` after merging. A refusal for any other reason (the remote moved on) stops with its message; nothing is forced.
+
+## 13. Allow the target's commands
+
+A shift refuses every prompt, and the allow list cannot name a target's own commands (map #4). Read `verify/checks`, `package.json`'s scripts and the recipe's Launch section for the suite command (the one a brief's `{test_cmd}` will name, such as `npm test`) and the command that starts the app. Show them, and what this would add (it changes nothing):
+
+```
+uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/settings" --allow "Bash(<test command>*)" --allow "Bash(<launch command>*)"
+```
+
+Its `add` lists only what is missing; empty: in place already. Otherwise ask; on yes, rerun it with `--write`. A refusal: show it and stop.
 
 ## Summary
 

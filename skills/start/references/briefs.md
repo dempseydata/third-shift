@@ -37,7 +37,7 @@ Every slot any brief uses, in one place. A subagent cannot open files inside thi
 - `{prior_fixes}`: empty on a first review. On a re-review: the fixes applied, then "Confirm each is correct and nothing regressed. Re-check the whole diff, not just the fixes."
 - `{probes}`: the full text of [probes.md](probes.md).
 
-Two rules recur in every brief that runs commands, and are written into each so a brief stands on its own: long commands run in the foreground, and a timed-out suite is a blocker naming `verify/checks`; scratch files stay under `.git/third-shift/`, because the shift's guard refuses any path outside the repo, `/tmp` included, and nothing under `.git/` is ever committed.
+Two rules recur in every brief that runs commands, and are written into each so a brief stands on its own: long commands run in the foreground, and a timed-out suite is a blocker naming `verify/checks`; no scratch files: after arm no Claude tool writes under `.git/` (Claude Code prompts for that protected path whatever the allow rules say, and a shift refuses every prompt) or outside the repo (the guard refuses it, `/tmp` included), so data passes on stdin or in a command's own output. Files the scripts write themselves (prescan.json, and sitting.json before arm) are unaffected.
 
 ## Prescan
 
@@ -96,8 +96,9 @@ what it owes, nothing more. Every existing test stays green: {test_cmd}.
 
 Run long commands (the suite, `verify/checks`, a browser run) in the foreground, never in the
 background; the foreground caps a command at 10 minutes. If the suite times out, stop and
-report a blocker naming `verify/checks`. Keep any scratch file under `.git/third-shift/`;
-the shift's guard refuses paths outside the repo, `/tmp` included.
+report a blocker naming `verify/checks`. Write no scratch file:
+nothing under `.git/` (a prompt, which the shift refuses) or outside the repo (the guard
+refuses it, `/tmp` included); pass data on stdin or in a command's own output.
 
 Project rules: {project_rules}. Commit nothing, push nothing, write nothing to the tracker.
 
@@ -134,7 +135,7 @@ the spec, {sources}, and the diff.
 4. Owed to this ticket by earlier reviews: {owed}. Each one left unpaid is must-fix.
 5. Check the project rules: {project_rules}. Run a dry-run stage (`git add -A --dry-run`).
 6. Run {test_cmd} in the foreground; record the count and duration. If it times out, report
-   a blocker naming `verify/checks`. Keep any scratch file under `.git/third-shift/`.
+   a blocker naming `verify/checks`. Write no scratch file, under `.git/` or outside the repo.
 7. Run `ponytail:ponytail-review` over the diff, if installed.
 
 Must-fix means: an unmet acceptance criterion; a contradiction of the spec, an ADR or a
@@ -160,7 +161,8 @@ Nothing beyond the list. The ticket's tests stay green; run {test_cmd_ticket}.
 
 Run long commands in the foreground, never in the background; the foreground caps a command
 at 10 minutes. If the suite times out, stop and report a blocker naming `verify/checks`.
-Keep any scratch file under `.git/third-shift/`; the guard refuses paths outside the repo.
+Write no scratch file: nothing under `.git/` (a prompt, which the shift refuses) or outside
+the repo (the guard refuses it); pass data on stdin or in a command's own output.
 
 Project rules: {project_rules}. Commit nothing, push nothing, write nothing to the tracker.
 
@@ -177,8 +179,8 @@ Verify ticket {ticket} of {spec} on branch {branch}. You did not write this code
 evidence, not repair.
 
 You may read anything, app code included, to learn how a term in a criterion appears in the
-app. Write only under `e2e/`, `verify/evidence/` and scratch under
-`.git/third-shift/` (never committed). Never edit app code, config, the
+app. Write only under `e2e/` and `verify/evidence/`; no scratch file, under `.git/` or outside
+the repo. Never edit app code, config, the
 fixtures, `verify/recipe.md`, `verify/checks` or the Playwright config, even to make a test
 pass. Commit nothing, push nothing, write nothing to the tracker. Project rules: {project_rules}.
 
@@ -205,8 +207,8 @@ the background; the foreground caps a command at 10 minutes. If the run times ou
 report a blocker naming `verify/checks`. Save the run's JSON report as
 `verify/evidence/{n}/report.json`, then strip machine paths from it: replace the repo's
 absolute path with `.` and your home directory with `~`, and search the file to confirm no
-absolute path remains. Keep any scratch file under `.git/third-shift/`; the shift's guard
-refuses paths outside the repo, `/tmp` included.
+absolute path remains. Write no scratch file: nothing under `.git/` (a prompt, which the
+shift refuses) or outside the repo (the guard refuses it, `/tmp` included).
 
 Verdicts, one per criterion:
 - met: its test exists, passed in this run, and its screenshot is saved.
