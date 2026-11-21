@@ -247,6 +247,7 @@ class Shift(Target):
         (self.target / "x").write_text("x")
         self.git("add", ".")
         self.git("commit", "-qm", "moved")
+        self.git("push", "-q", "origin", "main")  # ADR 0005: the base is the default branch
         code, _ = self.arm()
         self.assertEqual(code, 1)
         self.assertFalse((self.home / "acme").exists())

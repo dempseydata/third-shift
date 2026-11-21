@@ -14,7 +14,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #26 | closed | 728efb1 | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
 | #27 | open (human-verified) | 03d43fc | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
 | #28 | closed | bf8427f | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope); first commit refused by denylist (fixture URL), issue closed before it landed, corrected |
-| #29 | closed | (this commit) | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
+| #29 | closed | 3e2fd44 | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
+| #30 | closed | (this commit) | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -26,6 +27,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
 - #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
 - #37: the guard refuses paths outside the repo, `/tmp` included, so the `done --comment` file (and any scratch file the loop writes) must live inside the repo in a path no commit takes, e.g. under `.git/` (from #27 review).
+- #31: fill prescan.json's `checks`, `baseline_seconds`, `proven_commit` and `warnings`; until then `checks` is empty and arm sees no failed check (from #30).
+- #34: prescan `questions` are plain strings, each starting with its ticket number; arm never reads them, so the start skill must turn each into a sitting gap (from #30 review).
 - #31, #35: ADR 0006's single allow/deny rules file in `cli/` does not exist yet; the guard needed none. Whichever of #31/#35 lands first creates it (from #27).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
@@ -36,7 +39,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #21: a class in sitting.json overrides the label; every ticket, closed ones included, needs a class — ADR? no
 - #21: `--ceiling none` waives the ceiling; negative ceilings refused — ADR? no
 - #21: binding_sources come from sitting.json; warnings from both files — ADR? no
-- #21: base moved = `git rev-parse HEAD` differs from the prescan's base commit (ADR 0005 says compare against the default branch; revisit in #30/#31) — ADR? no
+- #21: ~~base moved = HEAD differs from the prescan's base~~ — superseded in #30: the base is origin's default-branch commit, and arm compares against it (ADR 0005) — ADR? no
 - #21: at arm, a blocker outside the ticket set counts as open — ADR? no
 - #21: arm refuses while runtime state says armed (one armed shift per repo) — ADR? yes
 - #21: usage errors and unexpected exceptions refuse as JSON, exit 1 — ADR? no (follows ADR 0003)
@@ -92,6 +95,10 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #29: refusals logged off the ledger (refusals.jsonl) are read into `ledger["end"]` at end and counted with the ledger's; a successful arm archives the old log as `refusals.<UTC>.jsonl` — ADR? no
 - #29: an unreadable tracker reads "Unknown"; stalled and unreached tickets list under Needs you; Done rows link each criterion's evidence directly — ADR? no
 
+- #30: cli/prescan loads cli/shift as a module (bytecode writes off) so criteria, slug and gh calls cannot drift; `--out` is required — ADR? no
+- #30: both triage labels, neither, a cycle, a self-edge, or a `## Blocked by` entry without a native link become questions; criteria accept `-`, `+`, `1.` and `1)` checkboxes and skip blank ones — ADR? no
+- #30: the prescan refuses while an unmerged `third-shift/<slug>` exists, local or remote (ADR 0005) — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -126,3 +133,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #28: no GraphQL mutation has run against real GitHub; shapes checked only by schema introspection
 - #29: two successful arms in the same second would overwrite the first refusal archive
 - #29: the per-ticket usage table ignores `lower_bound`
+- #30: a shift branch merged on the remote but not fetched refuses with a misleading "not merged"
+- #30: criteria after a `###` heading inside the criteria section are dropped
+- #30: a node between two cycles is named as "in" a cycle
+- #30: real gh pagination and the dependencies API shape unchecked

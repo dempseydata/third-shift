@@ -1,0 +1,113 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The prescan's mechanical half: read-only, it writes prescan.json and nothing else.
+
+Run from the target repo's folder as
+  uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/prescan" --spec N --out <file>
+Prints one JSON object: {"ok": true, "prescan": <file>, "tickets": count, "questions": [..]},
+exit 0; or {"ok": false, "refused": why}, exit 1, with nothing written.
+
+The ticket set is the spec's sub-issues; the shape is the one `cli/shift arm` reads (see its
+docstring), plus "questions": [text, ..], each naming its ticket, for the decision sitting:
+a ticket without exactly one triage label, a `## Blocked by` entry with no native link, a cycle
+in the native links, a ticket with no acceptance criteria. Criteria, slug, gh and git calls come
+from cli/shift itself, so admit compares against exactly what this froze.
+The base commit is the default branch's commit on origin (ADR 0005). A spec with no
+sub-issues, or an unmerged third-shift/<spec-slug> branch, refuses.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+_loader = importlib.machinery.SourceFileLoader("shift", str(Path(__file__).with_name("shift")))
+shift = importlib.util.module_from_spec(importlib.util.spec_from_loader("shift", _loader))
+sys.dont_write_bytecode = True  # read-only: no cli/__pycache__ in the plugin folder
+_loader.exec_module(shift)
+run, refuse, out, gh_list, criteria = shift.run, shift.refuse, shift.out, shift.gh_list, shift.criteria
+
+
+def blocked_by_body(body):
+    """Issue numbers under a ticket's `## Blocked by` heading: #N or an issue URL."""
+    m = re.search(r"^## Blocked by[ \t]*$(.*?)(?=^#+[ \t]|\Z)", body.replace("\r", ""), re.M | re.S)
+    return [int(n) for n in re.findall(r"(?:#|/issues/)(\d+)", m.group(1) if m else "")]
+
+
+def in_cycles(edges):
+    """The tickets on or between cycles: strip what has no blocker left, then what blocks none."""
+    live = set(edges)
+    for side in (lambda n: edges[n], lambda n: [m for m in live if n in edges[m]]):
+        while gone := {n for n in live if not set(side(n)) & live}:
+            live -= gone
+    return sorted(live)
+
+
+def prescan(a):
+    repo = shift.this_repo()
+    issue = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.spec}"))
+    spec = {"number": issue["number"], "title": issue["title"]}
+    subs = gh_list(f"repos/{repo}/issues/{a.spec}/sub_issues")
+    if not subs:
+        refuse(f"#{a.spec} has no sub-issues: a shift works the spec's sub-issues and nothing else")
+    default, base = shift.default_branch()
+    branch = f"third-shift/{shift.ledger_path(spec).stem}"
+    for sha in (run("git", "ls-remote", "origin", f"refs/heads/{branch}").split("\t")[0],
+                subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
+                               capture_output=True, text=True).stdout.strip()):
+        if sha and subprocess.run(["git", "merge-base", "--is-ancestor", sha, base],
+                                  capture_output=True).returncode:
+            refuse(f"{branch} is not merged into {default}: merge or delete it first (ADR 0005)")
+    tickets, questions = [], []
+    for s in subs:
+        n = s["number"]
+        t = json.loads(run("gh", "api", f"repos/{repo}/issues/{n}"))
+        body = t["body"] or ""
+        labels = [l["name"] for l in t["labels"]]
+        native = [b["number"] for b in gh_list(f"repos/{repo}/issues/{n}/dependencies/blocked_by")]
+        tickets.append({"number": n, "title": t["title"], "state": t["state"], "labels": labels,
+                        "blocked_by": native, "criteria": criteria(body)})
+        if len([l for l in labels if l in shift.CLASS_BY_LABEL]) != 1:
+            questions.append(f"#{n}: its triage label is {', '.join(labels) or 'missing'}; "
+                             "which class is it: agent, human-verified or human?")
+        unlinked = [b for b in dict.fromkeys(blocked_by_body(body)) if b not in native]
+        if unlinked:
+            questions.append(f"#{n}: its body says blocked by {', '.join(f'#{b}' for b in unlinked)}"
+                             ", with no native blocking link; add the link, or is it not a blocker?")
+        if not tickets[-1]["criteria"]:
+            questions.append(f"#{n}: it has no `## Acceptance criteria` checkboxes; what must it meet?")
+    cycle = in_cycles({t["number"]: [b for b in t["blocked_by"] if b in {u["number"] for u in tickets}]
+                       for t in tickets})
+    if cycle:
+        questions.append(f"{', '.join(f'#{n}' for n in cycle)}: their blocking links form a cycle; "
+                         "which link goes?")
+    Path(a.out).write_text(json.dumps({
+        "spec": spec, "repo": repo, "base_commit": base, "tickets": tickets,
+        "questions": questions,
+        # the environment checks (#31) fill these; until then arm sees no failed check
+        "checks": [], "warnings": [], "baseline_seconds": None, "proven_commit": None,
+    }, indent=2) + "\n")
+    out({"ok": True, "prescan": a.out, "tickets": len(tickets), "questions": questions})
+
+
+def main():
+    p = shift.Parser(prog="prescan")
+    p.add_argument("--spec", type=int, required=True)
+    p.add_argument("--out", required=True)
+    a = p.parse_args()
+    try:
+        prescan(a)
+    except subprocess.CalledProcessError as e:
+        refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
+    except Exception as e:  # ADR 0003: one JSON object, never a stack trace
+        refuse(f"{type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    main()

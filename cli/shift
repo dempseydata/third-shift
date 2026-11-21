@@ -63,6 +63,7 @@ prescan.json (written by cli/prescan):
   {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
    "tickets": [{"number", "title", "state": "open"|"closed", "labels": [..],
                 "blocked_by": [issue numbers, native links only], "criteria": [text, ..]}],
+   "questions": [text, ..] (for the sitting; arm does not read them),
    "checks": [{"name", "ok": bool, "detail"}], "warnings": [text, ..],
    "baseline_seconds": float, "proven_commit": sha}
 
@@ -221,7 +222,7 @@ def arm(a):
         tickets.append({"number": t["number"], "title": t["title"], "class": cls,
                         "starting_state": state, "blocked_by": t["blocked_by"],
                         "criteria": t["criteria"]})
-    if run("git", "rev-parse", "HEAD") != prescan["base_commit"]:
+    if default_branch()[1] != prescan["base_commit"]:  # ADR 0005: the base is the default branch
         refuse("the base commit has moved since the prescan")
 
     spec = prescan["spec"]
@@ -280,6 +281,15 @@ def arm(a):
         log.rename(log.with_name(f"refusals.{re.sub(r'[^0-9T]', '', now()[:19])}Z.jsonl"))
     out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel),
          **mirror(prescan["repo"], path, ledger)})
+
+
+def default_branch():
+    """The default branch of origin and its commit, read live."""
+    head = re.search(r"^ref: refs/heads/(\S+)\tHEAD\n(\w+)\tHEAD$",
+                     run("git", "ls-remote", "--symref", "origin", "HEAD"), re.M)
+    if not head:
+        refuse("cannot tell the default branch of origin")
+    return head[1], head[2]
 
 
 def gh_list(path):
@@ -361,7 +371,7 @@ def ticket(ledger, n, *states):
 def criteria(body):
     """The checkbox lines under a ticket's `## Acceptance criteria` heading."""
     m = re.search(r"^## Acceptance criteria[ \t]*$(.*?)(?=^#|\Z)", body.replace("\r", ""), re.M | re.S)
-    return re.findall(r"^\s*[-*] \[[ xX]\] (.+?)\s*$", m.group(1) if m else "", re.M)
+    return re.findall(r"^\s*(?:[-*+]|\d+[.)]) \[[ xX]\] (\S.*?)\s*$", m.group(1) if m else "", re.M)
 
 
 def gate(a, repo, ledger, role, limit):
@@ -601,11 +611,7 @@ def finish(repo, path, ledger, reason, findings=None, candidates=None, **extra):
         added = None
     also = []
     if o["end_state"] == "fast-forward":  # spec: the end state is applied at `end`
-        head = re.search(r"^ref: refs/heads/(\S+)\tHEAD$",
-                         run("git", "ls-remote", "--symref", "origin", "HEAD"), re.M)
-        if not head:
-            refuse("cannot tell the default branch of origin")
-        also = [f"{o['branch']}:refs/heads/{head[1]}"]  # a plain push: refused unless a fast-forward
+        also = [f"{o['branch']}:refs/heads/{default_branch()[0]}"]  # a plain push: refused unless a fast-forward
     log = runtime(repo).with_name("refusals.jsonl")  # spec: a refusal is never lost
     ledger["end"] = {"reason": reason, "end_state": o["end_state"], "findings": given[0],
                      "candidates": given[1], "added": added, "refused_off_ledger":
