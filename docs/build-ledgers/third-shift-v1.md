@@ -12,12 +12,13 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #24 | closed | 8c31748 | 1 (nits) | 86 tests, 104 s | usage gate in admit and step --begin; pause/resume; past 2× baseline again |
 | #25 | closed | ed40762 | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
 | #26 | closed | 728efb1 | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
-| #27 | open (human-verified) | (this commit) | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
+| #27 | open (human-verified) | 03d43fc | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
+| #28 | closed | (this commit) | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope) |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
 - #22: ~~`next` checks the branch before reading the ledger~~ — paid in #22.
-- #28: `done` renders the closing comment but neither posts it nor closes the issue; no ticket owns closing the issue — #28 should post the comment and close (from #22 review).
+- #28: ~~post the resolution comment and close at done~~ — paid in #28.
 - #24: ~~gate in admit and step --begin~~ — paid in #24.
 - #23: ~~suite speed~~ — paid in #23 (class fixtures copied per test).
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
@@ -80,6 +81,12 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #27: every state.json write is atomic (per-process temp + os.replace) — ADR? no
 - #27: stop-check does not count a refusal as progress — ADR? no
 
+- #28: `setup-board --spec N` is required, idempotent and takes no `--gen` (it runs before arm); the Spec option and view are named `#N <title>`; the view's filter is set by a second mutation — ADR? no
+- #28: board ids cached in `board.json` in runtime state, kept only while the board id matches; drawn state under `mirror` in state.json — ADR? no (ADR 0006)
+- #28: a failed mirror write does not fail the command: it reports `mirror: behind` and the next mirroring command catches up; a resolution comment whose reply was lost can be posted twice — ADR? yes (the ledger-first, mirror-behind posture)
+- #28: with no board, comments still post and done still closes; only cards are skipped (`mirror: behind: no board`) — ADR? no
+- #28: target folder → `.`, home → `~` in comments and Why — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -109,3 +116,6 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #27: passes: `python -c`, `base64 | sh`, aliases, a symlink already in the repo, writes to `.git/config`, `gh workflow run`
 - #27: `grep "/api"` is now refused (fails safe)
 - #27: PermissionDenied's exact payload and the guard's hook-timeout behaviour not checked
+- #28: a stall from stop-check is not mirrored until the next command
+- #28: a card deleted by hand leaves a stale item id
+- #28: no GraphQL mutation has run against real GitHub; shapes checked only by schema introspection

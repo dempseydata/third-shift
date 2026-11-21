@@ -8,6 +8,9 @@
 Run from the target repo's folder as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" <cmd>`.
 Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease lost.
 
+  setup-board --spec N   creates or finds the board `third-shift: <repo>` (ADR 0006), links it,
+       lays out its columns, Spec and Why fields and the spec's view, and caches the ids in
+       board.json in runtime state. Idempotent; run once per target and once per spec
   arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none]
   next --gen N
   admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits
@@ -69,6 +72,15 @@ heartbeat, refusals.jsonl, and copies of prescan.json and sitting.json. THIRD_SH
 with a timezone) stands in for the clock.
 The ledger is docs/third-shift-ledger/<spec-slug>.json (and .md) in the target, on the
 branch third-shift/<spec-slug>, where spec-slug is "<number>-<title, slugified>".
+
+The tracker mirror: after its record is written and pushed, each command that changes a ticket
+or the shift (arm, next, admit, step, done, needs-you, stall, release, pause, resume, wait, end,
+revive) redraws the changed cards, the resolution of each ticket with verdicts (Done: comment,
+then close; needs your run: comment only) and the one shift status comment on the spec issue.
+Best effort: a failed write adds "mirror": "behind: <why>" to the answer, which still succeeds,
+and the next such command redraws whatever runtime state's "mirror" says was not drawn. No board
+found: the comments and closes still go, the cards wait, and the answer says "behind: no board".
+Labels are never written.
 """
 import argparse
 import hashlib
@@ -255,7 +267,8 @@ def arm(a):
         subprocess.run(["git", "checkout", "-q", was_on], capture_output=True)
         subprocess.run(["git", "branch", "-q", "-D", branch], capture_output=True)
         raise
-    out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel)})
+    out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel),
+         **mirror(prescan["repo"], path, ledger)})
 
 
 def gh_list(path):
@@ -302,7 +315,7 @@ def next_(a):
     first = next((t for t in ledger["opening"]["tickets"]
                   if ledger["tickets"][str(t["number"])]["state"] == "Ready"), None)
     out({"ok": True, "ticket": first and {"number": first["number"], "title": first["title"]},
-         **({} if first else {"frontier": "empty"})})
+         **({} if first else {"frontier": "empty"}), **mirror(repo, path, ledger)})
 
 
 def save(path, ledger, message, *also):
@@ -392,7 +405,8 @@ def admit(a):
                  why="its acceptance criteria changed after the prescan froze them")
         event = "needs you"
     save(path, ledger, f"ledger: #{a.ticket} {event}")
-    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"]})
+    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"],
+         **mirror(repo, path, ledger)})
 
 
 RECORD = ("round", "model", "effort", "outcome", "before_5h", "before_weekly", "after_5h",
@@ -421,7 +435,7 @@ def step(a):
         **({"points": points} if points >= 0 else {"points": a.after_5h, "lower_bound": True})})
     t["usage"] = t.get("usage", 0) + ledger["steps"][-1]["points"]
     save(path, ledger, f"ledger: #{a.ticket} step")
-    out({"ok": True, "step": ledger["steps"][-1]})
+    out({"ok": True, "step": ledger["steps"][-1], **mirror(repo, path, ledger)})
 
 
 def done(a):
@@ -458,27 +472,24 @@ def done(a):
     else:
         t["state"] = "Done"
     save(path, ledger, f"ledger: #{a.ticket} {t['state'].lower()}")
-    cell = lambda s: s.replace("|", "\\|")
-    out({"ok": True, "ticket": a.ticket, **t, "comment": "\n".join([
-        "| Criterion | Verdict | Evidence |", "| --- | --- | --- |",
-        *(f"| {cell(r['criterion'])} | {r['verdict']} | [evidence]({r['evidence_url']}) |"
-          for r in rows)])})
+    # the mirror posts the resolution comment, and closes the issue only when Done (map #8)
+    out({"ok": True, "ticket": a.ticket, **t, "comment": table(rows), **mirror(repo, path, ledger)})
 
 
 def needs_you(a):
-    _, path, ledger = load(a.gen)
+    repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
     t.update(state="Needs you", reason=a.reason, why=a.why)
     save(path, ledger, f"ledger: #{a.ticket} needs you")
-    out({"ok": True, "ticket": a.ticket, **t})
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
 
 
 def stall(a):
-    _, path, ledger = load(a.gen)
+    repo, path, ledger = load(a.gen)
     t = ticket(ledger, a.ticket, "In progress")
     t.update(state="Stalled", why=a.why)
     save(path, ledger, f"ledger: #{a.ticket} stalled")
-    out({"ok": True, "ticket": a.ticket, **t})
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
 
 
 def release(a):
@@ -492,7 +503,7 @@ def release(a):
     state = json.loads(state_file.read_text())
     if state["shift_state"] == "waiting":
         write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
-    out({"ok": True, "ticket": a.ticket, **t})
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
 
 
 def note(a):
@@ -511,7 +522,7 @@ def note(a):
 
 
 def wait(a):
-    repo, _, ledger = load(a.gen)
+    repo, path, ledger = load(a.gen)
     state_file = runtime(repo)
     state = json.loads(state_file.read_text())
     if state["shift_state"] != "running":
@@ -521,7 +532,7 @@ def wait(a):
     if moving:
         refuse(f"tickets can still move: {', '.join(moving)}")
     write_atomic(state_file, json.dumps({**state, "shift_state": "waiting"}) + "\n")
-    out({"ok": True, "shift_state": "waiting"})
+    out({"ok": True, "shift_state": "waiting", **mirror(repo, path, ledger)})
 
 
 def pause(a):
@@ -534,7 +545,7 @@ def pause(a):
     save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} paused")
     write_atomic(state_file, json.dumps({**state, "shift_state": "paused", "until": a.until,
                                       "pause": a.reason}) + "\n")
-    out({"ok": True, "shift_state": "paused", "until": a.until})
+    out({"ok": True, "shift_state": "paused", "until": a.until, **mirror(repo, path, ledger)})
 
 
 def resume(a):
@@ -548,7 +559,7 @@ def resume(a):
     state.pop("until", None)
     state.pop("pause", None)
     write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
-    out({"ok": True, "shift_state": "running"})
+    out({"ok": True, "shift_state": "running", **mirror(repo, path, ledger)})
 
 
 def now():
@@ -574,7 +585,245 @@ def finish(repo, path, ledger, reason, **extra):
     state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
     write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "armed": False,
                                       "shift_state": "ended"}) + "\n")
-    return {"ok": True, **extra, "shift_state": "ended", "end_state": o["end_state"]}
+    return {"ok": True, **extra, "shift_state": "ended", "end_state": o["end_state"],
+            **mirror(repo, path, ledger)}
+
+
+# The tracker mirror (spec: The mirror). The ledger is the record (ADR 0002): every command
+# writes and pushes it first, then redraws what changed, best effort. What was drawn is kept in
+# runtime state ("mirror"), so a failed write is redrawn by the next command that mirrors.
+COLORS = ("GRAY", "BLUE", "YELLOW", "RED", "ORANGE", "GREEN")  # one per column, in STATES order
+OPTIONS = "options { id name color description }"
+BOARD = ("id number title url repositories(first: 50) { nodes { nameWithOwner } } "
+         f"fields(first: 50) {{ nodes {{ ... on ProjectV2FieldCommon {{ id name }} "
+         f"... on ProjectV2SingleSelectField {{ {OPTIONS} }} }} }} views(first: 50) {{ nodes {{ id name }} }}")
+FIELD = f"projectV2Field {{ ... on ProjectV2FieldCommon {{ id name }} ... on ProjectV2SingleSelectField {{ {OPTIONS} }} }}"
+lit = lambda s: json.dumps(s, ensure_ascii=False)  # a JSON string is a GraphQL string literal; UTF-8, not surrogate escapes
+
+
+def graphql(document, **variables):
+    return json.loads(run("gh", "api", "graphql", "-f", f"query={document}",
+                          *(x for k, v in variables.items() for x in ("-f", f"{k}={v}"))))["data"]
+
+
+def find_board(repo):
+    """The repo's node and the board titled `third-shift: <repo>` (ADR 0006), or None."""
+    owner, name = repo.split("/")
+    title = f"third-shift: {name}"
+    r = graphql("query Board($owner: String!, $name: String!, $title: String!) { repository(owner: "
+                "$owner, name: $name) { id owner { id ... on ProjectV2Owner { projectsV2(first: 20, "
+                f"query: $title) {{ nodes {{ {BOARD} }} }} }} }} }} }}",
+                owner=owner, name=name, title=title).get("repository")
+    p = r and next((p for p in r["owner"]["projectsV2"]["nodes"] if p["title"] == title), None)
+    return r, title, p
+
+
+def spec_option(spec):
+    return f"#{spec['number']} {spec['title']}"
+
+
+def board_ids(p, items):
+    """The ids the mirror writes by, from a board's node: cached, a speed-up only."""
+    f = {x["name"]: x for x in p["fields"]["nodes"] if x}
+    return {"id": p["id"], "number": p["number"], "url": p["url"], "status": f["Status"]["id"],
+            "columns": {o["name"]: o["id"] for o in f["Status"]["options"]},
+            "spec": f["Spec"]["id"], "why": f["Why"]["id"], "items": items,
+            "specs": {m[1]: o["id"] for o in f["Spec"]["options"]
+                      if (m := re.match(r"#(\d+) ", o["name"]))}}
+
+
+def setup_board(a):
+    repo = this_repo()
+    cache = runtime(repo).with_name("board.json")
+    spec = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.spec}"))
+    name = spec_option(spec)
+    r, title, p = find_board(repo)
+    if not r:
+        refuse(f"cannot read {repo} and its owner's boards; is the project scope granted?")
+    made = []
+    if not p:  # linked at birth
+        p = graphql(f"mutation CreateBoard {{ createProjectV2(input: {{ownerId: {lit(r['owner']['id'])}, "
+                    f"title: {lit(title)}, repositoryId: {lit(r['id'])}}}) {{ projectV2 {{ {BOARD} }} }} }}"
+                    )["createProjectV2"]["projectV2"]
+        made.append("board")
+    elif repo not in [x["nameWithOwner"] for x in p["repositories"]["nodes"]]:
+        graphql(f"mutation Link {{ linkProjectV2ToRepository(input: {{projectId: {lit(p['id'])}, "
+                f"repositoryId: {lit(r['id'])}}}) {{ clientMutationId }} }}")
+        made.append("link")
+    fields = {x["name"]: x for x in p["fields"]["nodes"] if x}
+
+    def options(opts):
+        return "[" + ", ".join(f"{{{'id: ' + lit(o['id']) + ', ' if o.get('id') else ''}name: "
+                               f"{lit(o['name'])}, color: {o['color']}, description: "
+                               f"{lit(o.get('description') or '')}}}" for o in opts) + "]"
+
+    def update(alias, field, opts):  # replaces the options; passing ids back keeps the cards
+        fields[alias] = graphql(f"mutation {alias.title()}Options {{ updateProjectV2Field(input: "
+                                f"{{fieldId: {lit(field['id'])}, singleSelectOptions: {options(opts)}}}) "
+                                f"{{ {FIELD} }} }}")["updateProjectV2Field"]["projectV2Field"]
+        made.append(alias.lower())
+
+    def create(alias, kind, opts=None):
+        fields[alias] = graphql(f"mutation {alias}Field {{ createProjectV2Field(input: {{projectId: "
+                                f"{lit(p['id'])}, dataType: {kind}, name: {lit(alias)}"
+                                + (f", singleSelectOptions: {options(opts)}" if opts else "")
+                                + f"}}) {{ {FIELD} }} }}")["createProjectV2Field"]["projectV2Field"]
+        made.append(alias.lower())
+
+    status = fields["Status"]
+    if [o["name"] for o in status["options"]] != list(STATES):
+        have = {o["name"].lower(): o["id"] for o in status["options"]}  # a new board's In Progress
+        update("Status", status, [{"id": have.get(s.lower()), "name": s, "color": c}
+                                  for s, c in zip(STATES, COLORS)])
+    if "Spec" not in fields:
+        create("Spec", "SINGLE_SELECT", [{"name": name, "color": "GRAY"}])
+    elif name not in [o["name"] for o in fields["Spec"]["options"]]:
+        update("Spec", fields["Spec"], [*fields["Spec"]["options"], {"name": name, "color": "GRAY"}])
+    if "Why" not in fields:
+        create("Why", "TEXT")
+    if name not in [v["name"] for v in p["views"]["nodes"]]:
+        view = graphql(f"mutation View {{ createProjectV2View(input: {{projectId: {lit(p['id'])}, "
+                       f"name: {lit(name)}, layout: BOARD_LAYOUT}}) {{ projectV2View {{ id }} }} }}"
+                       )["createProjectV2View"]["projectV2View"]["id"]
+        graphql(f"mutation ViewFilter {{ updateProjectV2View(input: {{viewId: {lit(view)}, "
+                f"filter: {lit(f'spec:{lit(name)}')}}}) {{ clientMutationId }} }}")
+        made.append("view")
+    p["fields"]["nodes"] = list(fields.values())
+    old = json.loads(cache.read_text()) if cache.exists() else {}
+    old = old.get("items", {}) if old.get("id") == p["id"] else {}  # a recreated board's cards are new
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(cache, json.dumps(board_ids(p, old)) + "\n")
+    out({"ok": True, "board": {"number": p["number"], "url": p["url"], "title": title},
+         "made": made})
+
+
+def mirror(repo, path, ledger):
+    """Redraws the changed cards, the shift status comment and any resolution; best effort.
+    Returns {} or {"mirror": "behind: <why>"}; never fails the command."""
+    try:
+        state_file = runtime(repo)
+        cache = state_file.with_name("board.json")
+        if cache.exists():
+            board = json.loads(cache.read_text())
+        else:  # another Mac: the board is found by its title (ADR 0006)
+            _, _, p = find_board(repo)
+            board = p and board_ids(p, {})  # no board: comments and closes still go, cards wait
+            if board:
+                write_atomic(cache, json.dumps(board) + "\n")
+        state = json.loads(state_file.read_text())
+        drawn = state.get("mirror") or {"cards": {}, "resolved": {}}
+        clean = lambda s: s.replace(state["target"], ".").replace(str(Path.home()), "~")
+
+        def keep():  # each part is recorded as soon as it is drawn
+            write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()),
+                                                 "mirror": drawn}) + "\n")
+        o = ledger["opening"]
+        spec = str(o["spec"]["number"])
+        if board and spec not in board["specs"]:
+            raise RuntimeError(f"the board has no Spec option for #{spec}; run setup-board --spec {spec}")
+        want = {n: {"status": t["state"], "why": clean(t["why"]) if t["state"] == "Needs you"
+                    and t.get("why") else None} for n, t in ledger["tickets"].items()}
+        changed = [n for n in want if drawn["cards"].get(n) != want[n] or n not in board["items"]] if board else []
+        new = [n for n in changed if n not in board["items"]]
+        if new:  # adding an issue already on the board returns its card
+            owner, name = repo.split("/")
+            nodes = graphql(f"query Issues {{ repository(owner: {lit(owner)}, name: {lit(name)}) {{ "
+                            + " ".join(f"i{n}: issue(number: {n}) {{ id }}" for n in new)
+                            + " } }")["repository"]
+            items = graphql("mutation AddCards { " + " ".join(
+                f"c{n}: addProjectV2ItemById(input: {{projectId: {lit(board['id'])}, contentId: "
+                f"{lit(nodes[f'i{n}']['id'])}}}) {{ item {{ id }} }}" for n in new) + " }")
+            board["items"].update({n: items[f"c{n}"]["item"]["id"] for n in new})
+            write_atomic(cache, json.dumps(board) + "\n")
+        if changed:
+            def edit(alias, n, field, value=None):
+                ids = (f"projectId: {lit(board['id'])}, itemId: {lit(board['items'][n])}, "
+                       f"fieldId: {lit(field)}")
+                if value is None:
+                    return f"{alias}{n}: clearProjectV2ItemFieldValue(input: {{{ids}}}) {{ clientMutationId }}"
+                return (f"{alias}{n}: updateProjectV2ItemFieldValue(input: {{{ids}, value: {value}}}) "
+                        "{ clientMutationId }")
+            parts = []
+            for n in changed:
+                parts += [edit("s", n, board["status"], f"{{singleSelectOptionId: {lit(board['columns'][want[n]['status']])}}}"),
+                          edit("p", n, board["spec"], f"{{singleSelectOptionId: {lit(board['specs'][spec])}}}")]
+                if want[n]["why"]:
+                    parts.append(edit("w", n, board["why"], f"{{text: {lit(want[n]['why'])}}}"))
+                elif (drawn["cards"].get(n) or {}).get("why"):
+                    parts.append(edit("w", n, board["why"]))
+            graphql("mutation Cards { " + " ".join(parts) + " }")
+            drawn["cards"].update({n: want[n] for n in changed})
+            keep()
+        for n, t in ledger["tickets"].items():  # a resolution per set of verdicts, then the close
+            if "verdicts" not in t:
+                continue
+            rows = hashlib.sha256(json.dumps(t["verdicts"]).encode()).hexdigest()
+            r = drawn["resolved"].get(n) or {}
+            if r.get("rows") != rows:
+                verdict = "Done" if t["state"] == "Done" else "Needs your run, so left open"
+                run("gh", "api", f"repos/{repo}/issues/{n}/comments", "-X", "POST", "-f",
+                    "body=" + clean(f"### Resolution: {verdict}\n\n{table(t['verdicts'])}\n"))
+                r = drawn["resolved"][n] = {"rows": rows, "closed": False}
+                keep()
+            if t["state"] == "Done" and not r["closed"]:
+                run("gh", "api", f"repos/{repo}/issues/{n}", "-X", "PATCH", "-f", "state=closed",
+                    "-f", "state_reason=completed")
+                r["closed"] = True
+                keep()
+        body = clean(status_body(ledger, path, json.loads(state_file.read_text())))
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        if drawn.get("comment_hash") != digest:
+            marker = body.split("\n", 1)[0]
+            cid = drawn.get("comment") or next(  # created once, even if its id was never kept
+                (c["id"] for c in gh_list(f"repos/{repo}/issues/{spec}/comments")
+                 if c["body"].startswith(marker)), None)
+            if cid:
+                run("gh", "api", f"repos/{repo}/issues/comments/{cid}", "-X", "PATCH", "-f", f"body={body}")
+            else:
+                cid = json.loads(run("gh", "api", f"repos/{repo}/issues/{spec}/comments", "-X", "POST",
+                                     "-f", f"body={body}"))["id"]
+            drawn.update(comment=cid, comment_hash=digest)
+            keep()
+        return {} if board else {"mirror": "behind: no board"}
+    except Exception as e:  # the record stands; the next command that mirrors catches up
+        why = e.stderr.strip() if isinstance(e, subprocess.CalledProcessError) else f"{type(e).__name__}: {e}"
+        return {"mirror": f"behind: {why[:300]}"}
+
+
+def status_body(ledger, path, state):
+    """The shift status comment: the shift's state and every ticket's, each In progress
+    ticket with its latest step."""
+    o, tickets = ledger["opening"], ledger["tickets"]
+    shift = state["shift_state"]
+    if shift == "paused":
+        shift += f" ({state.get('pause')}) until {state.get('until')}"
+    elif "end" in ledger:
+        shift = f"ended: {ledger['end']['reason']}"
+    count = lambda s: sum(t["state"] == s for t in tickets.values())
+    rows = []
+    for t in o["tickets"]:
+        u = tickets[str(t["number"])]
+        if u["state"] == "In progress":
+            s = next((s for s in reversed(ledger.get("steps", [])) if s["ticket"] == t["number"]), None)
+            note = f"step: {s['role']}, round {s['round']}" if s else "admitted"
+        else:
+            note = " · ".join(x for x in (u.get("reason"), u.get("why")) if x
+                              ) if u["state"] in ("Needs you", "Stalled") else ""
+        note = note.replace("|", "\\|").replace("\n", " ")
+        rows.append(f"| #{t['number']} | {u['state']} | {note} |")
+    return "\n".join([
+        f"<!-- third-shift status {path.stem} {o['base_commit']} -->",
+        f"### Shift status: {shift}", "",
+        f"Branch `{o['branch']}` · {count('Done')}/{len(tickets)} done · {count('Needs you')} need you"
+        f" · {count('Stalled')} stalled · {count('In progress')} in progress", "",
+        "| Ticket | State | Step or why |", "| --- | --- | --- |", *rows, ""])
+
+
+def table(rows):
+    cell = lambda s: s.replace("|", "\\|")
+    return "\n".join(["| Criterion | Verdict | Evidence |", "| --- | --- | --- |",
+                      *(f"| {cell(r['criterion'])} | {r['verdict']} | [evidence]({r['evidence_url']}) |"
+                        for r in rows)])
 
 
 def held(hook, strict=False):
@@ -1176,7 +1425,7 @@ def revive(a):
               "ticket_state": n and ledger["tickets"][n]["state"], "set_aside": ref}
     if revivals >= REVIVALS:
         out(finish(repo, path, ledger, "three revivals", **result))
-    out({"ok": True, **result, "shift_state": "running"})
+    out({"ok": True, **result, "shift_state": "running", **mirror(repo, path, ledger)})
 
 
 class Parser(argparse.ArgumentParser):
@@ -1280,6 +1529,8 @@ def main():
     s = sub.add_parser("end")
     s.add_argument("--gen", type=int, required=True)
     s.add_argument("--reason", required=True, type=text)
+    s = sub.add_parser("setup-board")
+    s.add_argument("--spec", type=int, required=True)
     for cmd in ("heartbeat", "stop-check", "is-dead", "revive", "guard", "deny-prompt",
                 "refused"):
         sub.add_parser(cmd)
@@ -1289,7 +1540,7 @@ def main():
          "needs-you": needs_you, "stall": stall, "release": release, "note": note,
          "pause": pause, "resume": resume, "wait": wait, "end": end, "heartbeat": heartbeat,
          "stop-check": stop_check, "is-dead": is_dead, "revive": revive, "guard": guard,
-         "deny-prompt": deny_prompt, "refused": refused}[a.cmd](a)
+         "deny-prompt": deny_prompt, "refused": refused, "setup-board": setup_board}[a.cmd](a)
     except subprocess.CalledProcessError as e:
         refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
     except Exception as e:  # ADR 0003: one JSON object, never a stack trace
