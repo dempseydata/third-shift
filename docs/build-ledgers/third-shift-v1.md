@@ -16,7 +16,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #28 | closed | bf8427f | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope); first commit refused by denylist (fixture URL), issue closed before it landed, corrected |
 | #29 | closed | 3e2fd44 | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
 | #30 | closed | 417282f | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
-| #31 | closed | (this commit) | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
+| #31 | closed | 310ceb5 | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
+| #32 | closed | (this commit) | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -33,6 +34,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
 - #35: write user settings from `cli/rules.json`; confirm its `uv run --script *cli/shift*` / `*cli/prescan*` allow patterns match how the skills actually call the scripts (from #31 review).
 - #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
+- #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
+- #33, #34: no command takes the Prescan role's starting-cost guess (only `admit`/`step --begin` take `--guess`); and briefs have no rule for a missing `verify/recipe.md` (from #32 review).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -108,6 +111,11 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #31: `verify/checks` is timed into the baseline, bounded at 600 s (`THIRD_SHIFT_CHECKS_TIMEOUT`); on timeout SIGTERM to the group, a grace period, then SIGKILL; chromium, ffmpeg and headless-shell must carry `INSTALLATION_COMPLETE` — ADR? no
 - #31: the push dry-run uses `--no-verify` so the target's pre-push hook never runs — ADR? no
 
+- #32: starting costs in points of the 5-hour window — Prescan 5, Implementer 6, Reviewer 5, Fixer 3, Verifier 3 — guesses set high on purpose (a high guess only pauses early) — ADR? no
+- #32: scratch files live under `.git/third-shift/` (never committed; the guard allows it) — ADR? no
+- #32: verifier files `e2e/<n>-<k>.spec.ts`, evidence under `verify/evidence/<n>/` (`<k>.png`, `report.json`, `<k>-steps.md`; a needs-your-run criterion gets a steps file, since done refuses a row without evidence) — ADR? yes (the evidence layout the eval set and targets depend on)
+- #32: reviewers treat an unpaid owed entry and an unsettled hard-to-reverse decision as must-fix; implementers build test-first with `tdd` (the `implement` skill is user-invoked only) — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -149,3 +157,4 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #31: when the settings `model` key is unset, the model warning appears on every run
 - #31: a webServer the Playwright runner never stops (detached, own group) is beyond the timeout's reach
 - #31: GH_TOKEN with a classic token not checked
+- #32: long lines in briefs.md not re-wrapped
