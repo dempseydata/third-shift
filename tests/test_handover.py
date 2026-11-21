@@ -102,6 +102,16 @@ class Handover(Board, Armed):
         self.assertIn("#### Security findings (security-preflight)\nNone.\n", text)
         self.assertIn("Unknown: the tracker could not be read", text)
 
+    def test_findings_and_candidates_inline_as_one_line_json(self):  # #38: no files after arm
+        top = self.git("rev-parse", "--show-toplevel")
+        code, out = self.end("--findings", f'["low: debug log in {top}/src/app.py", "none else"]',
+                             "--candidates", '["Prices as integer cents"]', added=False)
+        self.assertEqual(code, 0, out)
+        text = (self.target / HANDOVER).read_text()
+        self.assertIn("#### Security findings (security-preflight)\n"
+                      "- low: debug log in ./src/app.py\n- none else\n", text)
+        self.assertIn("(the model's view, not a decision)\n- Prices as integer cents\n", text)
+
     def test_end_refuses_an_unreadable_findings_file_and_writes_nothing(self):
         ledger = json.loads(FIXTURE.read_text())
         (self.target / LEDGER).write_text(json.dumps(ledger))
@@ -149,6 +159,12 @@ class Handover(Board, Armed):
         self.assertIn("- #21: a nit #### Done", text)
         self.assertIn("human work: see ./src/app.py", text)
         self.assertNotIn(top, text)
+
+    def test_an_empty_findings_file_or_list_reads_like_none(self):
+        code, out = self.end("--findings", "[]", added=False)
+        self.assertEqual(code, 0, out)
+        self.assertIn("#### Security findings (security-preflight)\nNone.\n",
+                      (self.target / HANDOVER).read_text())
 
     def test_an_empty_findings_file_reads_like_none(self):
         code, out = self.end("--findings", self.file("findings.md", "\n"), added=False)

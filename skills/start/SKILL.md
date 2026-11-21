@@ -11,7 +11,7 @@ A **shift** is one unattended run over one spec's tickets, from prescan to hando
 - **`start <spec>`**, from the builder at the Mac: [Prescan](#1-prescan), [Decision sitting](#2-decision-sitting), [Arm](#3-arm), then the [Shift](#4-shift).
 - **`start revive <owner/repo>`**, from the watchman: see [Revive](#revive).
 
-Run everything from the target repo's folder. Two rules hold throughout:
+Run everything from the target repo's folder; [Revive](#revive) first finds and moves to it. Two rules hold throughout:
 
 - Scripts run only as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/<script>" ...`, never from PATH. Each prints one JSON object: exit 0 done, 1 refused (`refused` says why), 2 lease lost (stop at once).
 - Before arm, scratch files live under `.git/third-shift/` in the target, never `/tmp` or anywhere outside the repo: the shift's guard refuses those paths, and nothing under `.git/` is committed. Create the folder with `mkdir -p .git/third-shift` if it is missing. After arm, no Claude tool writes scratch files at all: see [loop.md](references/loop.md)'s no-scratch-files rule.
@@ -90,8 +90,55 @@ Done when the loop reaches the [Handover](#handover), or a command exits 2 (the 
 
 ## Revive
 
-Written by ticket #38: `start revive <owner/repo>` (`is-dead` first, then `revive`, then the [Shift](#4-shift)). Until it is, stop and say that revival is not built yet.
+`start revive <owner/repo>` comes only from the watchman's scheduled task, every 15 minutes, with nobody at the Mac. It skips the prescan, the sitting and setup: the ledger and runtime state hold everything the shift started from. A revived session has no Remote Control, so it never asks a question: [loop.md](references/loop.md) sends what needs the builder to Needs you with a notification and carries on, and its Waiting step hands over instead of asking.
+
+1. **Is it dead?** The task cannot choose its working folder, so ask by name, from wherever this session started:
+
+   ```
+   uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" is-dead <owner/repo>
+   ```
+
+   `dead: false`, or any refusal: end the turn at once, with no notification and nothing else run. This is the usual answer, every 15 minutes, while a shift is alive.
+2. **Be in the target.** `git rev-parse --show-toplevel` must print the answer's `target`. If it does not (or fails), move the session there with `change_directory` (`path` the `target`; setup's allow list carries `mcp__ccd_directory__change_directory`, so the move should not wait on a trust prompt with nobody there, though whether that rule suppresses the prompt is unverified live), then schedule this skill to continue with a one-off `CronCreate`: `cron` the answer's `continue_cron`, `recurring: false`, `prompt` `/third-shift:start revive <owner/repo> moved`. End the turn; the move takes effect when it ends. If the argument already says `moved` and this session is still not in the target, end the turn without trying again: the next watchman run will.
+3. **Revive.**
+
+   ```
+   uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" revive
+   ```
+
+   With a STOP file it revives nothing: it ends the shift and answers `shift_state: "ended"`, `stop_file: true`; go to [Handover](#handover), already ended, reason `stop file`, with no revival notification. Otherwise it raises the lease, sets uncommitted work aside on `set_aside` (a pushed ref), restarts the ticket in progress from its last commit (two crashes on one ticket send it to Needs you) and returns the shift to running. Exit 1: another run revived it first, or it came back to life; end the turn quietly. Keep `gen`.
+4. **Notify**, with `PushNotification` (`status: "proactive"`), one message:
+
+   `third-shift <owner/repo>: revived as generation <gen> in a new session started by the scheduled task <watchman>; set aside: #<ticket> on <set_aside>`
+
+   With no ticket in progress write `set aside: nothing in progress`; with a ticket but no `set_aside`, `#<ticket> restarted, nothing uncommitted`. If `ticket_state` is `Needs you`, add `; #<ticket> needs you after two crashes`.
+5. **Carry on**:
+   - `shift_state: "ended"` (the third revival ended it): [Handover](#handover), already ended, reason `three revivals`.
+   - Otherwise: the [Shift](#4-shift) with this `gen`, marked as a revived session. `<branch>` is `third-shift/<spec-slug>`, `<repo>` this skill's argument; the ledger is `docs/third-shift-ledger/<spec-slug>.json`, the one file there whose name has no further suffix.
+
+Done when the turn ended quietly on a live shift, the session moved and scheduled its continuation, or the revival is notified and the loop or the handover has begun, or a stop file sent it straight to the handover.
 
 ## Handover
 
-Written by ticket #38: `end` with the security-preflight findings and the ADR candidates, the watchman's removal and the end notification. Until it is, run `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" end --gen <gen> --reason "<reason>"`, send one push notification `third-shift <owner/repo>: shift ended: <reason>`, and stop.
+Reached from the loop (`end` from the gate, a frontier left empty, an unhandled refusal with nothing in progress), from [Revive](#revive), or when the Stop hook says the shift has ended (three stalled tickets in a row, or a stop file). It carries a `<reason>`: the gate's `reason`, the loop's, `stop file`, or `three revivals`.
+
+A shift that the state script has **already ended** (revive answered `shift_state: "ended"`, or the Stop hook said so) has its handover written without findings or candidates: skip to step 4, with the watchman id from revive's answer, or the one the Stop hook's reason names. Neither names one: nothing to remove.
+
+The shift is still armed through step 3, so the allow list still binds: no file is written, and any command security-preflight tries outside the allow list is refused, which it reports as unchecked.
+
+1. **Security findings.** Run the `dempsey-skills:security-preflight` skill over the shift's work: the diff from the ledger's opening `base_commit` to `HEAD` on the shift branch. Ask it to read, not change, and to write no report file. If that skill is not installed (no `dempsey-skills` plugin), skip it: the findings are the one line `security-preflight not installed`. Take its findings as one line each, severity first, for example `high: SQL built from the query string in src/search.ts`. None found is an empty list.
+2. **ADR candidates**, the model's view and the only part of the handover the model writes: from the ledger's `notes` of kind `decision`, the ones hard to reverse that the builder should record as an ADR, one line each, `#<ticket>: <decision>; <why it deserves an ADR>`. None is an empty list.
+3. **End**, with both lists as one-line JSON arrays of strings in single quotes, as `done` takes its rows (a `'` inside is written `'\''`):
+
+   ```
+   uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" end --gen <gen> --reason "<reason>" --findings '["high: ..."]' --candidates '["#12: ..."]'
+   ```
+
+   It writes the handover beside the ledger from the records, commits and pushes it, applies the sitting's end state (the branch alone, or a fast-forward of the default branch), redraws the status comment as the handover, removes a STOP file, and disarms. Keep its `watchman`.
+   - Exit 2: the lease is lost. Stop at once, with nothing else.
+   - Exit 1: the shift is still armed. Send the end notification with `end refused: <refused>` as the reason, leave the watchman (it revives the shift, and the third revival ends it), and stop.
+4. **Remove the watchman**: `delete_scheduled_task` with `taskId` the `watchman` id. None recorded: nothing to remove. If the delete fails, say so in the notification: `; remove the scheduled task <id> by hand`.
+5. **Notify**, with `PushNotification` (`status: "proactive"`): `third-shift <owner/repo>: shift ended: <reason>; handover on #<spec>`.
+6. End the turn. The Stop hook lets an ended shift stop.
+
+Done when `end` answered `shift_state: "ended"` (or the shift was already ended), the watchman is deleted or its failure notified, and the end notification is sent.

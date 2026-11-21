@@ -22,7 +22,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #34 | open (human-verified) | 7b5779f | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
 | #35 | open (human-verified) | 2636a6b | 1 | 220 tests, 72 s | setup skill (per machine), cli/settings; live-only; round-1 fix checked by the orchestrator |
 | #36 | open (human-verified) | 059562b | 1 | 228 tests, 70 s | setup per target: board, pin, recipe drafts, proof in a scratch copy, cli/recipe; live-only; round-1 fix checked by the orchestrator |
-| #37 | open (human-verified) | (this commit) | 4 | 240 tests, 70 s | the shift loop (loop.md), `ceiling`, running steps, resume_cron, inline done JSON; 3 rounds + one small round per the rules; round-4 checked by the orchestrator |
+| #37 | open (human-verified) | 3bf249a | 4 | 240 tests, 70 s | the shift loop (loop.md), `ceiling`, running steps, resume_cron, inline done JSON; 3 rounds + one small round per the rules; round-4 checked by the orchestrator |
+| #38 | open (human-verified) | (this commit) | 1 | 249 tests, 72 s | revive and handover sections; STOP ends a shift (stop-check, gate, revive); inline end findings |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -32,7 +33,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #23: ~~suite speed~~ — paid in #23 (class fixtures copied per test).
 - #24: ~~suite speed~~ — partly paid in #24 (97 s at review, 104 s at commit).
 - #25: ~~suite speed; `pause --until` zoned~~ — paid in #25 (104 → 26 s).
-- #38: a STOP file lets the session stop but does not end the shift, and is-dead ignores STOP, so the watchman could revive it; #38's criterion "A stop file ends a shift, revived or not" owns it (from #26 review).
+- #38: ~~STOP ends a shift~~ — paid in #38.
 - #37: ~~scratch location~~ — paid in #37, superseded: after arm no Claude tool writes scratch files (`.git` is a protected path); `done --comment` takes inline JSON.
 - #31: ~~fill checks, baseline, Proven commit, warnings~~ — paid in #31.
 - #34: ~~prescan questions → sitting gaps~~ — paid in #34.
@@ -41,7 +42,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #36: ~~Proven section format~~ — paid in #36 (`cli/recipe proven`, tested against the real prescan check).
 - #37: ~~evidence path → permalink~~ — paid in #37.
 - #34: ~~Prescan usage; missing recipe~~ — paid in #34 (prescan usage not recorded, nothing is armed; a missing recipe fails `recipe proven`).
-- #38: the scheduled-task tool takes no working folder, so `start revive <owner/repo>` must find the target folder from runtime state.json's `target`; the watchman's task id is in state.json (`arm --watchman`) for removal at end (from #34 review).
+- #38: ~~revive finds the target; watchman removal~~ — paid in #38.
 - #37: ~~mid-shift ceiling waiver~~ — paid in #37 (`ceiling --gen N <N|none>`).
 
 ## Decisions
@@ -146,7 +147,14 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #37: blockers and stalls set work aside on named refs; a released ticket is rebuilt from scratch; "retry" is a short pause plus timer; a `not met` verdict spends a fix round; two failed spawns stall a ticket; `--tokens 0` when none reported — ADR? no
 - #37: rules.json gains `git rev-parse *`, `mkdir -p .git/third-shift*`, `npx playwright test*`, `playwright-cli*`, `./verify/checks`; setup step 13 adds the target's own test and launch commands via `cli/settings --allow` — ADR? no
 
+- #38: a STOP file ends the shift at stop-check when idle, at the gate after a running step, and at revive (no set-aside, no revival counted); `end` deletes STOP — ADR? no
+- #38: a revive started outside the target moves there with `change_directory` and continues via a one-off timer (the scheduled task has no folder parameter); amends ADR 0004; unverified live — ADR? yes
+- #38: `end --findings/--candidates` take inline JSON arrays; security-preflight findings and ADR candidates (from the ledger's decision notes, labelled the model's view) go to `end`; a missing plugin is noted, not fatal — ADR? no
+- #38: rules.json gains `Skill(dempsey-skills:security-preflight)`, `mcp__scheduled-tasks__delete_scheduled_task`, `mcp__ccd_directory__change_directory` — ADR? no
+
 ## Blocked
+
+None. No ticket was blocked; every must-fix was resolved within the fix rounds.
 
 ## Nits
 - #21: re-shift after a merge (ledger already tracked at base) with a failed push stages the ledger's deletion and the checkout back fails silently; restore ledger paths from base instead of rm --cached
@@ -199,3 +207,6 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #37: a `> report.json` redirect after `npx playwright test` still prompts in default permission mode (Edit check on the target)
 - #37: whether `get_usage` (an MCP tool) prompts mid-shift is unverified
 - #37: whether the Stop hook fires while a background agent runs is unverified live
+- #38: no test covers a failed push during the STOP end in stop-check (probed by hand, passes)
+- #38: whether the `change_directory` allow rule stops the prompt is unverified live; CronCreate and PushNotification have no allow entries
+- #38: a shift ended by revive or the Stop hook gets no security findings in its handover

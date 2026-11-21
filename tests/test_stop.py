@@ -58,10 +58,26 @@ class StopGate(Stopping):
         self.assertEqual(self.runtime()["session_id"], "s1")
         self.assertEqual(self.stop(session="s2"), {})
 
-    def test_a_stop_file_allows_the_stop(self):
+    def test_a_stop_file_between_steps_ends_the_shift_and_says_so_once(self):
         self.beat(0)
+        f = self.home / "acme" / "widget" / "state.json"
+        f.write_text(json.dumps({**self.runtime(), "watchman": "the-task"}))
+        (self.home / "acme" / "widget" / "STOP").write_text("")
+        reason = self.blocked()
+        self.assertIn("The shift has ended: stop file. Hand over; then stop.", reason)
+        self.assertIn("the-task", reason)  # the stored id, for the watchman's removal
+        self.assertEqual(self.ledger()["end"]["reason"], "stop file")
+        self.assertEqual((self.runtime()["armed"], self.runtime()["shift_state"]), (False, "ended"))
+        self.assertEqual(self.stop(), {})
+
+    def test_a_stop_file_during_a_step_allows_the_stop_and_the_gate_ends_it(self):
+        self.beat(0)
+        code, out = self.shift("step", "21", "--begin", "--gen", "1", "--role", "reviewer",
+                               *self.readings())
+        self.assertEqual((code, out["gate"]), (0, "proceed"), out)
         (self.home / "acme" / "widget" / "STOP").write_text("")
         self.assertEqual(self.stop(), {})
+        self.assertTrue(self.runtime()["armed"])
 
     def test_a_planned_pause_allows_the_stop(self):
         self.beat(0)

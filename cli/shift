@@ -32,17 +32,19 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   note decision|owed|nit <ticket> --gen N --text T [--for <later ticket>]   --for only, and
        always, for owed
   wait --gen N   refused while the frontier (Ready, In progress, unblocked Backlog) is not empty
-  end --gen N --reason R [--findings <file>] [--candidates <file>]   writes the handover
+  end --gen N --reason R [--findings <json|file>] [--candidates <json|file>]   inline one-line
+       JSON arrays of strings (one bullet each) or markdown files; writes the handover
        beside the ledger (<spec-slug>.handover.md) from the ledger, the tracker's sub-issues and
        the two files (security-preflight's findings; the ADR candidates, the model's view, as
-       markdown), applies the sitting's end state, then disarms. The handover replaces the
-       shift status comment
+       markdown), applies the sitting's end state, then disarms; answers the watchman's task
+       id. The handover replaces the shift status comment
   heartbeat   the hook's entry point (hooks/hooks.json): reads the hook's JSON on stdin; the
        first hook after arm or revive claims the lease for its session_id (ADR 0004)
   stop-check  the Stop hook's entry point: prints only the hook's decision, {} to let the session
        stop or {"decision": "block", "reason"}; a running step allows the stop; three blocked stops without a ledger change stall
        the ticket in progress (work set aside on refs/third-shift/<spec-slug>/stalled-<n>-<k>);
-       three stalled tickets in a row end the shift. Any failure exits 1, which Claude Code
+       three stalled tickets in a row, or a STOP file between steps, end the shift (blocked once,
+       naming the watchman). Any failure exits 1, which Claude Code
        treats as a non-blocking error: the gate fails open, and the watchman is the backstop
   guard       the PreToolUse hook on Bash: denies, while this session holds an armed shift's
        lease, pushes other than to third-shift/* branches; force, delete and mirror pushes;
@@ -53,9 +55,13 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   refused     the PermissionDenied hook. Every refusal (guard, deny-prompt, refused) is logged to
        the ledger's "refused" list in a `ledger: refused` commit, or, off the shift branch or if
        the push fails, to refusals.jsonl in runtime state
-  is-dead     for the watchman: {"dead": bool, "why"}
+  is-dead [owner/repo]   for the watchman: {"dead": bool, "why", "target", "continue_cron"};
+       named, it runs from any folder and gives the target's folder; with a STOP file, a silent shift is dead
+       even while waiting or paused, so a revival hands it over (the gate ends a live one)
   revive      takes over a dead shift: raises the lease, sets uncommitted work aside on
-       refs/third-shift/<spec-slug>/set-aside-<gen>, restarts the ticket from its last commit
+       refs/third-shift/<spec-slug>/set-aside-<gen>, restarts the ticket from its last commit;
+       with a STOP file it revives nothing and ends the shift ("stop_file": true, reason stop
+       file). `end` removes a STOP file
 
 READINGS, from the desktop app's usage tool (whole percent used):
   --5h P --reset ISO --weekly P [--weekly P ..] --guess G   one --weekly per weekly window
@@ -398,6 +404,8 @@ def gate(a, repo, ledger, role, limit):
         write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()),
                                           "gate_end": why}) + "\n")
         return {"gate": "end", "reason": why}
+    if state_file.with_name("STOP").exists():  # map #10: the builder's stop file ends the shift
+        return end("stop file")
     if state["shift_state"] == "paused":
         return {"gate": "pause-until", "until": state["until"], "resume_cron": cron(state["until"]),
                 "reason": f"the shift is paused until {state['until']}"}
@@ -660,7 +668,9 @@ def end(a):
 def finish(repo, path, ledger, reason, findings=None, candidates=None, **extra):
     o = ledger["opening"]
     top, private = str(path.parents[2]), str(Path.home())  # the handover may be public
-    given = [f and redact(Path(f).read_text().replace(top, ".").replace(private, "~"), 20000).strip()
+    given = [f and redact((  # inline one-line JSON (no files after arm, #37), or a file
+        "\n".join(f"- {' '.join(x.split())}" for x in json.loads(f)) if f.startswith("[")
+        else Path(f).read_text()).replace(top, ".").replace(private, "~"), 20000).strip()
              for f in (findings, candidates)]
     known = {t["number"] for t in o["tickets"]}
     try:  # the one tracker read: sub-issues the prescan did not see
@@ -678,9 +688,12 @@ def finish(repo, path, ledger, reason, findings=None, candidates=None, **extra):
                      [json.loads(r) for r in log.read_text().splitlines()] if log.exists() else []}
     save(path, ledger, f"ledger: #{o['spec']['number']} ended", *also)
     state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
-    write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "armed": False,
+    state = json.loads(state_file.read_text())
+    write_atomic(state_file, json.dumps({**state, "armed": False,
                                       "shift_state": "ended"}) + "\n")
+    state_file.with_name("STOP").unlink(missing_ok=True)  # spent: it stopped this shift, not the next
     return {"ok": True, **extra, "shift_state": "ended", "end_state": o["end_state"],
+            "watchman": state.get("watchman"),  # the skill removes the scheduled task
             **mirror(repo, path, ledger)}
 
 
@@ -1056,18 +1069,23 @@ def stop_check(a):
     o = ledger["opening"]
     if run("git", "rev-parse", "--abbrev-ref", "HEAD") != o["branch"]:
         refuse(f"not on the shift branch {o['branch']}")
-    if state_file.with_name("STOP").exists() or state.get("gate_end"):
+    stop = state_file.with_name("STOP").exists()
+    if state.get("gate_end") or stop and "step" in state:  # a running step meets the gate first
         out({})
+
+    def ended(why, moved=""):  # told once: the shift is disarmed, so the next stop is free
+        watchman = finish(o["repo"], path, ledger, why)["watchman"]
+        out({"decision": "block", "reason": f"{moved}The shift has ended: {why}. Hand over; then "
+             "stop." + (f" The watchman's task id is {watchman}." if watchman else "")})
+    if stop:  # an idle session would otherwise stay armed, its hooks live, until the watchman
+        ended("stop file")
 
     def row(moved=""):  # three stalls in a row since this shift's arming end it, even waiting
         subjects = run("git", "log", "--format=%s", "--", str(path))
         outcomes = re.findall(r"^ledger: #\d+ (done|needs you|released|stalled|armed)$",
                               subjects, re.M)
         if outcomes[:STALLS] == ["stalled"] * STALLS:
-            why = "three stalled tickets in a row"
-            finish(o["repo"], path, ledger, why)
-            out({"decision": "block", "reason": f"{moved}The shift has ended: {why}. Hand over; "
-                 "then stop."})  # told once: the shift is disarmed, so the next stop is free
+            ended("three stalled tickets in a row", moved)
     row()
     if state["shift_state"] in ("paused", "waiting") or "step" in state:
         out({})  # a running step: its tool calls beat, and its completion notice wakes the session
@@ -1544,22 +1562,31 @@ def death(state_file):
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     if not state.get("armed"):
         return False, "no shift is armed"
-    if state["shift_state"] == "waiting" or state.get("pause") == "owner":
+    stop = state_file.with_name("STOP").exists()  # it lifts the exemptions: nobody hands over else
+    if not stop and (state["shift_state"] == "waiting" or state.get("pause") == "owner"):
         return False, f"{state['shift_state']} on the builder"  # map #10: never dead
     beat = state_file.with_name("heartbeat")
     last = max(datetime.fromisoformat(t) for t in (
         state["since"], *([json.loads(beat.read_text())["at"]] if beat.exists() else [])))
     deadline = last + SILENCE
-    if state["shift_state"] == "paused":  # a planned pause: dead only past the reset + 15 min
+    if state["shift_state"] == "paused" and not stop:  # a planned pause: dead only past the reset + 15 min
         deadline = max(deadline, datetime.fromisoformat(state["until"]) + PAUSE_GRACE)
     if datetime.fromisoformat(now()) < deadline:
         return False, f"{state['shift_state']}; dead from {deadline.isoformat()} if silent"
-    return True, f"{state['shift_state']} and silent since {last.isoformat()}"
+    return True, f"{state['shift_state']} and silent since {last.isoformat()}" + (", stop file" if stop else "")
 
 
 def is_dead(a):
-    dead, why = death(runtime(this_repo()))
-    out({"ok": True, "dead": dead, "why": why})
+    """The watchman's session may start outside the target (ADR 0004 amended by #38): named,
+    the repo is found in runtime state, and the answer gives its folder and a one-off cron
+    (now plus 3 minutes) to continue there."""
+    if a.repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo) or ".." in (a.repo or ""):
+        refuse(f"not an owner/repo: {a.repo!r}")
+    state_file = runtime(a.repo or this_repo())
+    dead, why = death(state_file)
+    target = state_file.exists() and json.loads(state_file.read_text()).get("target")
+    out({"ok": True, "dead": dead, "why": why, **({"target": target, "continue_cron": cron(now())}
+                                                  if target else {})})
 
 
 def revive(a):
@@ -1569,6 +1596,8 @@ def revive(a):
     if not dead:
         refuse(f"the shift is not dead: {why}")
     state = json.loads(state_file.read_text())
+    if state_file.with_name("STOP").exists():  # the builder asked to stop: hand over, no revival
+        out(finish(repo, path, ledger, "stop file", stop_file=True))
     gen, revivals = state["gen"] + 1, state.get("revivals", 0) + 1
     n = next((n for n, t in ledger["tickets"].items() if t["state"] == "In progress"), None)
     if n:
@@ -1590,7 +1619,8 @@ def revive(a):
                                       "retired": retired,  # the next hook, never these, claims
                                       "shift_state": "running"}) + "\n")
     result = {"gen": gen, "revivals": revivals, "ticket": n and int(n),
-              "ticket_state": n and ledger["tickets"][n]["state"], "set_aside": ref}
+              "ticket_state": n and ledger["tickets"][n]["state"], "set_aside": ref,
+              "stop_file": False, "watchman": state.get("watchman")}  # named in the revival's notification
     if revivals >= REVIVALS:
         out(finish(repo, path, ledger, "three revivals", **result))
     out({"ok": True, **result, "shift_state": "running", **mirror(repo, path, ledger)})
@@ -1712,9 +1742,9 @@ def main():
     s.add_argument("--candidates")
     s = sub.add_parser("setup-board")
     s.add_argument("--spec", type=int, required=True)
-    for cmd in ("heartbeat", "stop-check", "is-dead", "revive", "guard", "deny-prompt",
-                "refused"):
+    for cmd in ("heartbeat", "stop-check", "revive", "guard", "deny-prompt", "refused"):
         sub.add_parser(cmd)
+    sub.add_parser("is-dead").add_argument("repo", nargs="?")
     a = p.parse_args()
     try:
         {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,

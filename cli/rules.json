@@ -22,7 +22,10 @@
     "Bash(./verify/checks)",
     "Bash(npx playwright test *)",
     "Bash(playwright-cli *)",
-    "Bash(mkdir -p .git/third-shift*)"
+    "Bash(mkdir -p .git/third-shift*)",
+    "Skill(dempsey-skills:security-preflight)",
+    "mcp__scheduled-tasks__delete_scheduled_task",
+    "mcp__ccd_directory__change_directory"
   ],
   "deny": [
     "Bash(git push *--force*)",
