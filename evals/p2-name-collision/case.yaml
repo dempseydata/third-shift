@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p2-name-collision
+description: 'Prescan: #13 adds a subcommand that shares the tool''s name, `quill quill`.'
+tags: [prescan]
+expected_outcome: 'A collision gap on #13''s `quill` subcommand. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '(?=[\s\S]{0,400}?#13\b)(?=[\s\S]{0,400}?(collid|collision|clash|ambigu|same name|shares))'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the report lists a decision gap that the `quill` subcommand of #13 shares the tool''s own name, so that `quill quill` (or `quill <file>` with a file named `quill`) is ambiguous, and asks how the command should be named or resolved. FAIL if this collision is not raised as a gap.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

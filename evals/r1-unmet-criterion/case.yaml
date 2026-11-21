@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: r1-unmet-criterion
+description: 'Reviewer: the diff for #12 exits 0 with a header when the journal is missing; criterion 3 wants exit 3.'
+tags: [reviewer]
+expected_outcome: 'MUST-FIX naming #12''s third criterion (exit 3 when the journal file does not exist). Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '(?<!no )(?<!clean[.:,] )\bMUST-FIX\b[\s\S]*?(exit(s|ing)?\s+(code\s+)?3\b|criterion\s+3\b|third criterion)'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the verdict is MUST-FIX and a must-fix finding names the unmet criterion: `quill export` must exit 3 with a message on standard error when the journal file does not exist, but the diff swallows the missing file and exits 0 with just the header (and its test asserts that). FAIL if the verdict is CLEAN, or if this criterion is not raised as must-fix.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

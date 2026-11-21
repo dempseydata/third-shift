@@ -16,7 +16,7 @@ It runs inside Claude Code on your subscription, not the API.
 
 None of these is built or committed to yet.
 
-**Status: pre-release.** The `start` skill is the working night shift it grew out of.
+**Status: pre-release.** The `start` skill is the working shift it grew out of.
 Verification gates, the progress board and the usage gate are being designed; parallel
 work comes after version 1; see [docs/ideation/factory-research.md](docs/ideation/factory-research.md). Why it
 exists is in [docs/why.md](docs/why.md).

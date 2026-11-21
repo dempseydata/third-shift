@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p4-control
+description: 'Prescan, the control: every contract is fixed by a source; only an easy-to-reverse choice is open.'
+tags: [prescan]
+expected_outcome: 'No decision gap; #11, #12 and #13 are all agent. Must pass 3 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '\b(no|zero|0)\s+([\w-]+\s+){0,3}gaps?\b|\bgaps?\b[^\n]{0,40}\b(none|nothing)\b|\bgaps?\b[^\n]*\n\s*([-*]\s*)?(there are\s+)?(none|nothing)\b|\bgaps?\W{0,3}0\b|\bnone found\b'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the report lists no decision gap: every contract (the journal''s path and format, commands, output, exit codes, install) is fixed by the spec or ADR 0001, and the only open choice, whether `count` shares the journal reader with `list`, is easy to reverse and is left out. FAIL if any decision gap is reported, including that open choice.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

@@ -1,0 +1,247 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The prescan's mechanical half: read-only, it writes prescan.json and nothing else.
+
+Run from the target repo's folder as
+  uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/prescan" --spec N --out <file>
+Prints one JSON object: {"ok": true, "prescan": <file>, "tickets": count, "questions": [..]},
+exit 0; or {"ok": false, "refused": why}, exit 1, with nothing written.
+
+The ticket set is the spec's sub-issues; the shape is the one `cli/shift arm` reads (see its
+docstring), plus "questions": [text, ..], each naming its ticket, for the decision sitting:
+a ticket without exactly one triage label, a `## Blocked by` entry with no native link, a cycle
+in the native links, a ticket with no acceptance criteria. Criteria, slug, gh and git calls come
+from cli/shift itself, so admit compares against exactly what this froze.
+The base commit is the default branch's commit on origin (ADR 0005). A spec with no
+sub-issues, or an unmerged third-shift/<spec-slug> branch, refuses.
+
+Then the environment checks (#31), each {"name", "ok", "detail"}; a failed one names setup and
+arm refuses on it, but a failed check is a result here, not a refusal. They read user settings
+(~/.claude/settings.json, or $CLAUDE_CONFIG_DIR) against cli/rules.json (ADR 0006), `gh auth
+status`, the board by title, `uv`, `npx playwright install --dry-run chromium`, `pmset -g batt`
+and git, and run `verify/checks`, timed and bounded by $THIRD_SHIFT_CHECKS_TIMEOUT seconds
+(default 600), whose duration is the baseline. "mains power" carries "mode": "away": on battery
+it refuses only an away shift, and a warning tells a day shift. The recipe is proven when
+verify/recipe.md's `## Proven` section names a commit at which the recipe (less that section)
+and playwright.config.* read as they do now. A default model other than Opus is a warning.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+_loader = importlib.machinery.SourceFileLoader("shift", str(Path(__file__).with_name("shift")))
+shift = importlib.util.module_from_spec(importlib.util.spec_from_loader("shift", _loader))
+sys.dont_write_bytecode = True  # read-only: no cli/__pycache__ in the plugin folder
+_loader.exec_module(shift)
+run, refuse, out, gh_list, criteria = shift.run, shift.refuse, shift.out, shift.gh_list, shift.criteria
+
+
+def blocked_by_body(body):
+    """Issue numbers under a ticket's `## Blocked by` heading: #N or an issue URL."""
+    m = re.search(r"^## Blocked by[ \t]*$(.*?)(?=^#+[ \t]|\Z)", body.replace("\r", ""), re.M | re.S)
+    return [int(n) for n in re.findall(r"(?:#|/issues/)(\d+)", m.group(1) if m else "")]
+
+
+def in_cycles(edges):
+    """The tickets on or between cycles: strip what has no blocker left, then what blocks none."""
+    live = set(edges)
+    for side in (lambda n: edges[n], lambda n: [m for m in live if n in edges[m]]):
+        while gone := {n for n in live if not set(side(n)) & live}:
+            live -= gone
+    return sorted(live)
+
+
+SETUP = "; run /third-shift:setup"
+PROVEN = re.compile(r"^#+[ \t]*Proven\b.*?(?=^#|\Z)", re.M | re.S)
+
+
+def sh(*cmd, cwd=None, timeout=120):
+    """A command's result, never an exception: a missing command or a timeout is a failure."""
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+
+
+def timed_checks(top):
+    """verify/checks' duration in seconds, or None and why it failed."""
+    if not os.access(Path(top, "verify", "checks"), os.X_OK):
+        return None, "verify/checks is missing or not executable"
+    limit = float(os.environ.get("THIRD_SHIFT_CHECKS_TIMEOUT", 600))  # spec: the foreground cap
+    t = time.monotonic()
+    p = subprocess.Popen(["verify/checks"], cwd=top, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    try:
+        output = p.communicate(timeout=limit)[0]
+    except subprocess.TimeoutExpired:
+        # SIGTERM first: a runner's exit handlers stop the servers it started outside its group
+        # (Playwright's webServer); a group that ignores it is killed, and a server its runner
+        # never stopped is beyond reach.
+        os.killpg(p.pid, signal.SIGTERM)
+        try:
+            p.communicate(timeout=float(os.environ.get("THIRD_SHIFT_CHECKS_GRACE", 10)))
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.communicate()
+        return None, f"verify/checks timed out after {limit:g} s"
+    if p.returncode:
+        return None, f"verify/checks exited {p.returncode}: {output.strip()[-300:]}"
+    return round(time.monotonic() - t, 1), ""
+
+
+def proven(top):
+    """The recipe's Proven commit, or None, and what changed since it."""
+    files = ["verify/recipe.md", *sorted(f.name for f in Path(top).glob("playwright.config.*"))]
+    if len(files) < 2 or not Path(top, files[0]).is_file():
+        return None, "verify/recipe.md or playwright.config.* is missing"
+    section = PROVEN.search(Path(top, files[0]).read_text())
+    sha = next((c for word in re.findall(r"\b[0-9a-f]{7,40}\b", section[0] if section else "")
+                if (c := sh("git", "rev-parse", "-q", "--verify", f"{word}^{{commit}}",
+                            cwd=top).stdout.strip())), None)
+    if not sha:
+        return None, "verify/recipe.md has no `## Proven` section naming a commit"
+    def body(text):
+        return PROVEN.sub("", text).rstrip()
+    changed = [f for f in files if (p := sh("git", "show", f"{sha}:{f}", cwd=top)).returncode
+               or body(p.stdout) != body(Path(top, f).read_text())]
+    return sha, changed and f"changed since the Proven commit: {', '.join(changed)}"
+
+
+def environment(repo, top, default, base, branch):
+    """The environment checks (#31) and warnings, the baseline and the Proven commit."""
+    checks, warnings = [], []
+
+    def check(name, ok, detail="", **extra):
+        checks.append({"name": name, "ok": bool(ok), "detail": detail + ("" if ok else SETUP),
+                       **extra})
+
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        settings = json.loads((root / "settings.json").read_text())
+    except (OSError, ValueError):
+        settings = None
+    settings = settings if isinstance(settings, dict) else None
+    auth = sh("gh", "auth", "status", "--json", "hosts", "--active", "--hostname", "github.com")
+    try:
+        scopes = {s.strip() for a in json.loads(auth.stdout)["hosts"]["github.com"]
+                  if a.get("active") for s in (a.get("scopes") or "").split(",")}
+    except (ValueError, KeyError, TypeError):
+        scopes = set()
+    check("project scope", "project" in scopes, f"gh token scopes: {', '.join(sorted(scopes - {''})) or 'unreadable'}")
+    check("token scopes", "repo" in scopes, "pushing and tracker writes need the repo scope")
+    try:
+        board = shift.find_board(repo)
+        check("board", board[2], f"a board titled `{board[1]}`")
+    except Exception as e:
+        check("board", False, f"cannot read the board: {type(e).__name__}")
+    check("uv", sh("uv", "--version").returncode == 0, "uv runs the plugin's scripts")
+    rules = json.loads(Path(__file__).with_name("rules.json").read_text())
+    perms = (settings or {}).get("permissions") or {}
+    missing = [r for k in ("allow", "deny") for r in rules[k] if r not in (perms.get(k) or [])]
+    missing += [f"permissions.{k}: {json.dumps(v)}" for k, v in rules["set"].items() if perms.get(k) != v]
+    check("allow and deny rules", settings and not missing,
+          f"missing from user settings: {', '.join(missing)}" if settings else "user settings unreadable")
+    plugins = (settings or {}).get("enabledPlugins") or {}
+    check("guard hooks", any(k.split("@")[0] == "third-shift" and v is True for k, v in plugins.items()),
+          "the guard loads only with the plugin installed and enabled (ADR 0006)")
+    sha, changed = proven(top)
+    check("recipe proven", sha and not changed, changed or f"proven at {sha}" if sha else changed)
+    dry = sh("npx", "--no-install", "playwright", "install", "--dry-run", "chromium", cwd=top)
+    places = [l.strip() for l in re.findall(r"Install location:(.*)", dry.stdout)]
+    absent = [l for l in places if not Path(l, "INSTALLATION_COMPLETE").is_file()]
+    check("playwright browser", dry.returncode == 0 and places and not absent,
+          "the pinned @playwright/test's chromium is " + ("installed" if places and not absent else "not installed"))
+    push = sh("git", "push", "--dry-run", "--no-verify", "origin", f"HEAD:refs/heads/{branch}", cwd=top)
+    check("push", push.returncode == 0, f"git push --dry-run: {push.stderr.strip()[-300:]}")
+    mains = "'AC Power'" in sh("pmset", "-g", "batt").stdout
+    check("mains power", mains, "on mains power" if mains else "not on mains power, or unreadable",
+          mode="away")
+    if not mains:
+        warnings.append("The Mac is on battery (or its power is unreadable): a day shift may run it flat")
+    problems = [why for bad, why in (
+        (sh("git", "status", "--porcelain", cwd=top).stdout.strip(), "the tree is not clean"),
+        (sh("git", "branch", "--show-current", cwd=top).stdout.strip() != default, f"not on {default}"),
+        (sh("git", "rev-parse", "HEAD", cwd=top).stdout.strip() != base, f"not level with origin/{default}"),
+    ) if bad]
+    check("clean start", not problems, "; ".join(problems))
+    baseline, why = timed_checks(top)
+    check("verify/checks", baseline is not None, why or f"passed in {baseline} s")
+    model = (settings or {}).get("model") or "not set"
+    if "opus" not in model.lower():
+        warnings.append(f"The default model is {model}, not Opus: the roles assume Opus")
+    return {"checks": checks, "warnings": warnings, "baseline_seconds": baseline,
+            "proven_commit": sha}
+
+
+def prescan(a):
+    repo = shift.this_repo()
+    issue = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.spec}"))
+    spec = {"number": issue["number"], "title": issue["title"]}
+    subs = gh_list(f"repos/{repo}/issues/{a.spec}/sub_issues")
+    if not subs:
+        refuse(f"#{a.spec} has no sub-issues: a shift works the spec's sub-issues and nothing else")
+    default, base = shift.default_branch()
+    branch = f"third-shift/{shift.ledger_path(spec).stem}"
+    for sha in (run("git", "ls-remote", "origin", f"refs/heads/{branch}").split("\t")[0],
+                subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
+                               capture_output=True, text=True).stdout.strip()):
+        if sha and subprocess.run(["git", "merge-base", "--is-ancestor", sha, base],
+                                  capture_output=True).returncode:
+            refuse(f"{branch} is not merged into {default}: merge or delete it first (ADR 0005)")
+    tickets, questions = [], []
+    for s in subs:
+        n = s["number"]
+        t = json.loads(run("gh", "api", f"repos/{repo}/issues/{n}"))
+        body = t["body"] or ""
+        labels = [l["name"] for l in t["labels"]]
+        native = [b["number"] for b in gh_list(f"repos/{repo}/issues/{n}/dependencies/blocked_by")]
+        tickets.append({"number": n, "title": t["title"], "state": t["state"], "labels": labels,
+                        "blocked_by": native, "criteria": criteria(body)})
+        if len([l for l in labels if l in shift.CLASS_BY_LABEL]) != 1:
+            questions.append(f"#{n}: its triage label is {', '.join(labels) or 'missing'}; "
+                             "which class is it: agent, human-verified or human?")
+        unlinked = [b for b in dict.fromkeys(blocked_by_body(body)) if b not in native]
+        if unlinked:
+            questions.append(f"#{n}: its body says blocked by {', '.join(f'#{b}' for b in unlinked)}"
+                             ", with no native blocking link; add the link, or is it not a blocker?")
+        if not tickets[-1]["criteria"]:
+            questions.append(f"#{n}: it has no `## Acceptance criteria` checkboxes; what must it meet?")
+    cycle = in_cycles({t["number"]: [b for b in t["blocked_by"] if b in {u["number"] for u in tickets}]
+                       for t in tickets})
+    if cycle:
+        questions.append(f"{', '.join(f'#{n}' for n in cycle)}: their blocking links form a cycle; "
+                         "which link goes?")
+    top = run("git", "rev-parse", "--show-toplevel")
+    Path(a.out).write_text(json.dumps({
+        "spec": spec, "repo": repo, "base_commit": base, "tickets": tickets,
+        "questions": questions, **environment(repo, top, default, base, branch),
+    }, indent=2) + "\n")
+    out({"ok": True, "prescan": a.out, "tickets": len(tickets), "questions": questions})
+
+
+def main():
+    p = shift.Parser(prog="prescan")
+    p.add_argument("--spec", type=int, required=True)
+    p.add_argument("--out", required=True)
+    a = p.parse_args()
+    try:
+        prescan(a)
+    except subprocess.CalledProcessError as e:
+        refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
+    except Exception as e:  # ADR 0003: one JSON object, never a stack trace
+        refuse(f"{type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    main()

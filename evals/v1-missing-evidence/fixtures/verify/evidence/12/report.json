@@ -1,0 +1,72 @@
+{
+  "config": {
+    "rootDir": "."
+  },
+  "suites": [
+    {
+      "title": "12-1.spec.ts",
+      "file": "12-1.spec.ts",
+      "specs": [
+        {
+          "title": "prints a header row `time,text` then one row per entry, oldest first",
+          "ok": true,
+          "file": "12-1.spec.ts",
+          "tests": [
+            {
+              "status": "expected",
+              "results": [
+                {
+                  "status": "passed",
+                  "duration": 412,
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "verify/evidence/12/1.png"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "12-2.spec.ts",
+      "file": "12-2.spec.ts",
+      "specs": [
+        {
+          "title": "is quoted as RFC 4180 requires",
+          "ok": true,
+          "file": "12-2.spec.ts",
+          "tests": [
+            {
+              "status": "expected",
+              "results": [
+                {
+                  "status": "passed",
+                  "duration": 412,
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "verify/evidence/12/2.png"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "expected": 2,
+    "unexpected": 0,
+    "flaky": 0,
+    "skipped": 0
+  }
+}

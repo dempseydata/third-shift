@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p1-file-contract
+description: 'Prescan: #11 writes the journal file that #12 reads, and no source fixes its format.'
+tags: [prescan]
+expected_outcome: 'A decision gap on the journal file''s format, naming #11 and #12. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '(?=[\s\S]{0,400}?journal)(?=[\s\S]{0,400}?#11\b)(?=[\s\S]{0,400}?#12\b)'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the report lists a decision gap about the format or shape of the journal file, naming #11 (which writes it) and #12 (which reads it) as producer and consumer, with options and a recommendation. FAIL if no such gap is reported, or if the gap does not name both tickets.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

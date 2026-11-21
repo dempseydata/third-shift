@@ -18,9 +18,14 @@ local-data/
 graphify-out/
 *.png
 !docs/screenshots/*.png
+!evals/*/fixtures/**/*.png
 
 # Claude Code state, project settings and the toolchain inventory: tooling, not product.
 # This template still tracks its .claude/ files so a copy carries them; a product re-inited
 # from it ignores .claude/ from the first commit.
 .claude/
 what-is-installed.md
+
+# Eval set: prompts are rendered from the briefs before every run (evals/render); run output
+evals/*/prompt.md
+evals/results/

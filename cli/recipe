@@ -1,0 +1,128 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The target's verify recipe Proven record and its Playwright pin, for `setup` (#36).
+
+Run from the target repo's folder as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/recipe" <cmd>`.
+Prints one JSON object: {"ok": true, ...}, exit 0; or {"ok": false, "refused": why}, exit 1,
+with nothing written.
+
+  proven [--commit REV --note TEXT]
+       Without --commit, changes nothing: {"proven": sha|null, "changed": why|""}, the prescan's
+       own `recipe proven` reading. With them, rewrites verify/recipe.md's `## Proven` section
+       to `<sha>: <note>` at the end of the file, then reads it back with the prescan's check;
+       a commit at which the recipe (less that section) or playwright.config.* differ from now
+       refuses and restores the file (#31). {"proven": sha, "written": bool}.
+  pin  Finds the released @playwright/test whose chromium is already installed, by the signal
+       the prescan reads: every `Install location` of `playwright install --dry-run chromium`
+       holds INSTALLATION_COMPLETE. {"version": v, "pinned": bool}: pinned is true when
+       package.json already names that exact version and its browser is installed, so there
+       is nothing to do. It installs nothing and edits nothing.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+_loader = importlib.machinery.SourceFileLoader("prescan", str(Path(__file__).with_name("prescan")))
+prescan = importlib.util.module_from_spec(importlib.util.spec_from_loader("prescan", _loader))
+sys.dont_write_bytecode = True  # no cli/__pycache__ in the plugin folder
+_loader.exec_module(prescan)
+sh, out, refuse, PROVEN = prescan.sh, prescan.out, prescan.refuse, prescan.PROVEN
+RECIPE = "verify/recipe.md"
+
+
+def proven(a, top):
+    if not a.commit:
+        sha, changed = prescan.proven(top)
+        out({"ok": True, "proven": sha, "changed": changed or ""})
+    if not a.note:
+        refuse("--commit needs --note: the break and the failure it produced")
+    sha = sh("git", "rev-parse", "-q", "--verify", f"{a.commit}^{{commit}}", cwd=top).stdout.strip()
+    if not sha:
+        refuse(f"not a commit: {a.commit}")
+    path = Path(top, RECIPE)
+    if not path.is_file():
+        refuse(f"{RECIPE} is missing")
+    old = path.read_text()
+    note = " ".join(a.note.split())  # one line: a line starting with # would end the section
+    new = f"{PROVEN.sub('', old).rstrip()}\n\n## Proven\n\n{sha}: {note}\n"
+    path.write_text(new)
+    got, changed = prescan.proven(top)
+    if got != sha or changed:
+        path.write_text(old)
+        refuse(changed or f"the prescan reads the Proven commit as {got}, not {sha}")
+    out({"ok": True, "proven": sha, "written": new != old})
+
+
+def complete(dry):
+    """True when a dry run lists install locations and every one is fully installed."""
+    places = [l.strip() for l in re.findall(r"Install location:(.*)", dry.stdout)]
+    return dry.returncode == 0 and bool(places) and all(
+        Path(p, "INSTALLATION_COMPLETE").is_file() for p in places)
+
+
+def pin(top):
+    try:
+        pkg = json.loads(Path(top, "package.json").read_text())
+    except (OSError, ValueError) as e:
+        refuse(f"no readable package.json ({type(e).__name__}): a target needs a Node web app")
+    have = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}.get("@playwright/test", "")
+    if re.fullmatch(r"\d+\.\d+\.\d+", have) and complete(
+            sh("npx", "--no-install", "playwright", "install", "--dry-run", "chromium", cwd=top)):
+        out({"ok": True, "version": have, "pinned": True})
+    view = sh("npm", "view", "@playwright/test", "versions", "--json", cwd=top)
+    try:
+        versions = json.loads(view.stdout)
+    except ValueError:
+        versions = None
+    if view.returncode or not isinstance(versions, list):  # offline, npm prints {"error": ...}
+        refuse(f"npm view @playwright/test failed: {(view.stderr or view.stdout).strip()[-300:]}")
+    released = sorted((v for v in versions if re.fullmatch(r"\d+\.\d+\.\d+", v)),
+                      key=lambda v: tuple(map(int, v.split("."))), reverse=True)
+    installed = None
+    for v in released:  # newest first; chromium revisions only grow with the version
+        dry = sh("npx", "--yes", f"playwright@{v}", "install", "--dry-run", "chromium", cwd=top)
+        if complete(dry):
+            out({"ok": True, "version": v, "pinned": False})
+        if installed is None:  # the browser cache, from where this version would install
+            where = re.search(r"Install location:\s*(.*chromium-\d+)", dry.stdout)
+            installed = [int(d.name.rpartition("-")[2]) for d in
+                         Path(where[1].strip()).parent.glob("chromium-[0-9]*")
+                         if (d / "INSTALLATION_COMPLETE").is_file()] if where else []
+        rev = re.search(r"playwright chromium v(\d+)\)", dry.stdout)
+        if not installed or (rev and int(rev[1]) < min(installed)):
+            if installed and v == released[0]:
+                refuse(f"only pre-releases match an installed chromium: every one is newer than "
+                       f"release {v}'s; run `npx playwright@{v} install chromium` once, attended, then rerun")
+            break
+    refuse("no released @playwright/test matches an installed chromium: run `npx playwright "
+           "install chromium` once, attended, then rerun")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="recipe")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("proven")
+    s.add_argument("--commit")
+    s.add_argument("--note")
+    sub.add_parser("pin")
+    a = p.parse_args()
+    top = sh("git", "rev-parse", "--show-toplevel").stdout.strip()
+    if not top:
+        refuse("not inside a git repository")
+    proven(a, top) if a.cmd == "proven" else pin(top)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        refuse(f"{type(e).__name__}: {e}")

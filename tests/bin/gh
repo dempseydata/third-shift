@@ -1,0 +1,11 @@
+#!/bin/sh
+# Fake gh for the script suite (ADR 0007): tests/bin/fake_gh.py, but `repo view`, which every
+# state-script command asks, is answered here, since a shell starts in a fifth of the time.
+if [ "$1 $2" = "repo view" ]; then
+  read -r line < "$FAKE_GH_DIR/fixture.json"  # one line, as json.dumps writes it
+  repo=${line#*'"repo":'}
+  repo=${repo#*'"'}
+  printf '{"nameWithOwner": "%s"}\n' "${repo%%\"*}"
+  exit 0
+fi
+exec python3 -I -S "${0%/*}/fake_gh.py" "$@"

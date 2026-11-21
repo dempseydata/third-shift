@@ -1,0 +1,15 @@
+{
+  "brief": "Reviewer",
+  "slots": {
+    "ticket": "#12 Export entries as CSV (at `{fixtures}/tickets/12.md`, laid out as `gh issue view 12` prints it)",
+    "spec": "#10 quill version 1 (at `{fixtures}/spec.md`, laid out as `gh issue view 10` prints it; the target repository is checked out read-only at `{fixtures}/`)",
+    "branch": "third-shift/10-quill-version-1 (this session has no shell: the uncommitted diff is saved at `{fixtures}/diff.patch`, and the branch is not checked out)",
+    "sources": "ADR 0001 (`{fixtures}/adr/0001.md`), then closed decision tickets (none), then the spec #10, then everything else only where those are silent",
+    "prior_fixes": "",
+    "seams": "the built CLI, run as a subprocess (`node dist/quill.js`) in a temporary `QUILL_HOME`, asserting on standard output, standard error, the exit code and the journal file",
+    "decisions": "- `export` lives in its own module, `src/export.js`, required by `src/quill.js` (easy to reverse).",
+    "owed": "none",
+    "project_rules": "public repository, so never commit secrets, machine paths or real user data; `.githooks/pre-commit` runs `npm test`",
+    "test_cmd": "`npm test` (one file: `node --test test/<name>.test.js`; this session cannot run commands, so record the test result as not run)"
+  }
+}

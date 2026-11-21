@@ -1,0 +1,78 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Adds cli/rules.json's allow list and deny rules, and its `set` permissions keys, to user
+settings (ADR 0006), for `setup`.
+
+Run as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/settings" [--write] [--allow RULE ..]`;
+--allow adds a rule to the allow list, for the target's own test command (map #4). User settings are
+$CLAUDE_CONFIG_DIR/settings.json, else ~/.claude/settings.json, as the prescan reads them.
+Without --write it changes nothing and shows what --write would add. Prints one JSON object:
+{"ok": true, "settings": file, "add": {"allow": [..], "deny": [..], "set": {key: value}},
+"written": bool}, exit 0;
+or {"ok": false, "refused": why}, exit 1, with nothing written.
+
+Only missing rules are added, at the end of each list; a `set` key appears in "add" whenever its
+value differs, so a user's own value is shown before --write replaces it. Every other key and
+entry is kept, so a rerun with nothing missing writes nothing. Unreadable or unwritable settings
+refuse rather than be replaced; the file keeps its mode.
+"""
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def out(obj, code=0):
+    print(json.dumps(obj, ensure_ascii=False))
+    sys.exit(code)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="settings")
+    p.add_argument("--write", action="store_true", help="add the missing rules")
+    p.add_argument("--allow", action="append", default=[], help="an extra allow rule")
+    a = p.parse_args()
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "settings.json"
+    rules = json.loads(Path(__file__).with_name("rules.json").read_text())
+    rules["allow"] += [r for r in a.allow if r not in rules["allow"]]
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError) as e:
+        out({"ok": False, "refused": f"user settings unreadable ({type(e).__name__}): fix or "
+             "move the file, then rerun"}, 1)
+    perms = settings.get("permissions", {}) if isinstance(settings, dict) else None
+    if not isinstance(perms, dict) or not all(isinstance(perms.get(k, []), list)
+                                              for k in ("allow", "deny")):
+        out({"ok": False, "refused": "user settings are not in the expected shape: "
+             "permissions.allow and permissions.deny must be lists"}, 1)
+    add = {k: [r for r in rules[k] if r not in perms.get(k, [])] for k in ("allow", "deny")}
+    add["set"] = {k: v for k, v in rules["set"].items() if perms.get(k) != v}
+    written = a.write and any(add.values())
+    if written:
+        for k in ("allow", "deny"):
+            if add[k]:
+                perms[k] = perms.get(k, []) + add[k]
+        perms.update(add["set"])
+        settings["permissions"] = perms
+        real = path.resolve()  # a symlinked settings file stays a symlink
+        if real.exists() and not os.access(real, os.W_OK):
+            out({"ok": False, "refused": f"user settings are not writable: {real}"}, 1)
+        tmp = real.with_name(f".settings.json.{os.getpid()}")
+        try:
+            real.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            if real.exists():
+                os.chmod(tmp, real.stat().st_mode & 0o7777)
+            os.replace(tmp, real)  # atomic: the app never reads a half-written file
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            out({"ok": False, "refused": f"cannot write user settings ({type(e).__name__}): {e}"}, 1)
+    out({"ok": True, "settings": str(path), "add": add, "written": bool(written)})
+
+
+if __name__ == "__main__":
+    main()

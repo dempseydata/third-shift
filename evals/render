@@ -1,0 +1,61 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Render each eval case's prompt.md from the current briefs (map #19). Run before every run:
+  uv run --script evals/render
+
+For each evals/<case>/slots.json, {"brief": <role>, "slots": {<name>: <text>}}, it takes that
+role's brief from skills/start/references/briefs.md, fills every {slot}, and writes
+evals/<case>/prompt.md with the role table's model as its frontmatter. Only the fixtures, slot
+values and graders (case.yaml) are frozen; a changed brief is what the set measures.
+In slot text, {fixtures} becomes the absolute path of the case's fixtures/ folder, its read-only
+add_dirs entry, which a run cannot otherwise find; so prompt.md is generated and ignored by git.
+{probes} is the full text of probes.md unless a case sets it, as the briefs' Slots section says.
+Prints one JSON object: {"ok": true, "rendered": [case, ..]}, exit 0; or {"ok": false,
+"refused": why}, exit 1, with nothing written (no such brief or role, a slot with no value).
+"""
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REFS = ROOT / "skills" / "start" / "references"
+SLOT = re.compile(r"\{([a-z_]+)\}")
+
+
+def render():
+    briefs = (REFS / "briefs.md").read_text()
+    models = {m[1].strip(): m[2].strip().lower()
+              for m in re.finditer(r"^\|([^|]+)\|([^|]+)\|", briefs, re.M)}
+    probes = (REFS / "probes.md").read_text().strip()
+    prompts = {}
+    for slots_file in sorted((ROOT / "evals").glob("*/slots.json")):
+        case = slots_file.parent
+        data = json.loads(slots_file.read_text())
+        role = data["brief"]
+        brief = re.search(rf"^## {re.escape(role)}\n+```\n(.*?)\n```", briefs, re.M | re.S)
+        if not brief or role not in models:
+            raise ValueError(f"{case.name}: briefs.md has no brief or role-table row for {role!r}")
+        values = {"probes": probes, **data["slots"]}
+        missing = sorted(set(SLOT.findall(brief[1])) - values.keys())
+        if missing:
+            raise ValueError(f"{case.name}: no value for slot {', '.join(missing)}")
+        fixtures = str(case / "fixtures")
+        body = SLOT.sub(lambda m: values[m[1]].replace("{fixtures}", fixtures), brief[1])
+        prompts[case] = f"---\nmodel: {models[role]}\n---\n\n{body}\n"
+    if not prompts:
+        raise ValueError("no eval cases: evals/*/slots.json")
+    for case, text in prompts.items():  # every prompt built before any is written
+        (case / "prompt.md").write_text(text)
+    return [case.name for case in prompts]
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps({"ok": True, "rendered": render()}))
+    except Exception as e:  # refusals and the unexpected alike, as JSON (ADR 0003)
+        print(json.dumps({"ok": False, "refused": f"{type(e).__name__}: {e}"}))
+        sys.exit(1)

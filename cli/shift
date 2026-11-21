@@ -1,0 +1,1762 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""The state script (ADR 0003): the only writer of a shift's ledger and runtime state.
+
+Run from the target repo's folder as `uv run --script "${CLAUDE_PLUGIN_ROOT}/cli/shift" <cmd>`.
+Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease lost.
+
+  setup-board --spec N   creates or finds the board `third-shift: <repo>` (ADR 0006), links it,
+       lays out its columns, Spec and Why fields and the spec's view, and caches the ids in
+       board.json in runtime state. Idempotent; run once per target and once per spec
+  arm --prescan <file> --sitting <file> --mode day|away [--ceiling N|none] [--watchman <task id>]
+       --watchman records the watchman's scheduled-task id in runtime state (ADR 0004)
+  next --gen N
+  admit <ticket> --gen N READINGS   applies the usage gate for the implementer, then admits; the
+       implementer step is then running, as after step --begin; needs-you and stall end it
+  step <ticket> --begin --gen N --role R READINGS   the usage gate at a later step boundary; on
+       proceed the step is running (runtime state `step`) until its record below
+  step <ticket> --gen N --role R --round K --model M --effort E --before-5h P --before-weekly P
+       --after-5h P --after-weekly P --start ISO [--end ISO] --tokens T --outcome TEXT
+       --end defaults to now; --start is the `now` that admit or step --begin answered
+  pause --gen N --reason usage|owner --until ISO   (the reset time)
+  resume --gen N
+  ceiling --gen N <N|none>   raises or waives the weekly ceiling mid-shift (map #6)
+  done <ticket> --gen N --comment <json|file|->   inline, file or stdin: [{"criterion", "verdict", "evidence_url"}]
+  needs-you <ticket> --gen N --reason blocker|human-verify|human|"set aside after a crash" --why W
+  stall <ticket> --gen N --why W   needs-you and stall set uncommitted work aside on
+       refs/third-shift/<spec-slug>/<needs-you|stalled>-<n>-<k> and reset the tree
+  release <ticket> --gen N [--decision D]
+  note decision|owed|nit <ticket> --gen N --text T [--for <later ticket>]   --for only, and
+       always, for owed
+  wait --gen N   refused while the frontier (Ready, In progress, unblocked Backlog) is not empty
+  end --gen N --reason R [--findings <json|file>] [--candidates <json|file>]   inline one-line
+       JSON arrays of strings (one bullet each) or markdown files; writes the handover
+       beside the ledger (<spec-slug>.handover.md) from the ledger, the tracker's sub-issues and
+       the two files (security-preflight's findings; the ADR candidates, the model's view, as
+       markdown), applies the sitting's end state, then disarms; answers the watchman's task
+       id. The handover replaces the shift status comment
+  heartbeat   the hook's entry point (hooks/hooks.json): reads the hook's JSON on stdin; the
+       first hook after arm or revive claims the lease for its session_id (ADR 0004)
+  stop-check  the Stop hook's entry point: prints only the hook's decision, {} to let the session
+       stop or {"decision": "block", "reason"}; a running step allows the stop; three blocked stops without a ledger change stall
+       the ticket in progress (work set aside on refs/third-shift/<spec-slug>/stalled-<n>-<k>);
+       three stalled tickets in a row, or a STOP file between steps, end the shift (blocked once,
+       naming the watchman). Any failure exits 1, which Claude Code
+       treats as a non-blocking error: the gate fails open, and the watchman is the backstop
+  guard       the PreToolUse hook on Bash: denies, while this session holds an armed shift's
+       lease, pushes other than to third-shift/* branches; force, delete and mirror pushes;
+       branch deletes; changes to remotes; destructive gh commands; paths outside the repo; and
+       any command it cannot read. Prints the hook's decision, {} to pass
+  deny-prompt the PermissionRequest hook: denies every prompt in the shift's session, but
+       AskUserQuestion
+  refused     the PermissionDenied hook. Every refusal (guard, deny-prompt, refused) is logged to
+       the ledger's "refused" list in a `ledger: refused` commit, or, off the shift branch or if
+       the push fails, to refusals.jsonl in runtime state
+  is-dead [owner/repo]   for the watchman: {"dead": bool, "why", "target", "continue_cron"};
+       named, it runs from any folder and gives the target's folder; with a STOP file, a silent shift is dead
+       even while waiting or paused, so a revival hands it over (the gate ends a live one)
+  revive      takes over a dead shift: raises the lease, sets uncommitted work aside on
+       refs/third-shift/<spec-slug>/set-aside-<gen>, restarts the ticket from its last commit;
+       with a STOP file it revives nothing and ends the shift ("stop_file": true, reason stop
+       file). `end` removes a STOP file
+
+READINGS, from the desktop app's usage tool (whole percent used):
+  --5h P --reset ISO --weekly P [--weekly P ..] --guess G   one --weekly per weekly window
+  --unreadable --guess G                                     when the tool did not answer
+  --guess is the role's starting cost from the role table, used until the role has steps.
+The gate answers {"gate": "proceed"|"pause-until"|"retry"|"end", "reason", "until",
+"retry_in_minutes", "resume_cron", "estimate": {"points", "guess"}}; `step --begin` exits 0 with
+any answer, `admit` exits 1 (refused) with any answer but proceed. resume_cron (with until, and
+in pause's answer) is the one-off local-time cron for until plus 3 minutes.
+
+prescan.json (written by cli/prescan):
+  {"spec": {"number", "title"}, "repo": "owner/name", "base_commit": sha,
+   "tickets": [{"number", "title", "state": "open"|"closed", "labels": [..],
+                "blocked_by": [issue numbers, native links only], "criteria": [text, ..]}],
+   "questions": [text, ..] (for the sitting; arm does not read them),
+   "checks": [{"name", "ok": bool, "detail", "mode": "away" (counts only for that mode)}],
+   "warnings": [text, ..],
+   "baseline_seconds": float, "proven_commit": sha}
+
+sitting.json (written by the start skill's decision sitting):
+  {"classes": {"<ticket>": "agent"|"human-verified"|"human"},  overrides the triage label
+   "gaps": [{"question", "answer", "adr": path}], "end_state": "branch"|"fast-forward",
+   "binding_sources": [in precedence order], "warnings": [text, ..]}
+
+Runtime state lives in $THIRD_SHIFT_HOME (default ~/.third-shift)/<owner>/<repo>/: state.json,
+heartbeat, refusals.jsonl, and copies of prescan.json and sitting.json. THIRD_SHIFT_NOW (ISO,
+with a timezone) stands in for the clock.
+The ledger is docs/third-shift-ledger/<spec-slug>.json (and .md) in the target, on the
+branch third-shift/<spec-slug>, where spec-slug is "<number>-<title, slugified>".
+
+The tracker mirror: after its record is written and pushed, each command that changes a ticket
+or the shift (arm, next, admit, step, done, needs-you, stall, release, pause, resume, wait, end,
+revive) redraws the changed cards, the resolution of each ticket with verdicts (Done: comment,
+then close; needs your run: comment only) and the one shift status comment on the spec issue.
+Best effort: a failed write adds "mirror": "behind: <why>" to the answer, which still succeeds,
+and the next such command redraws whatever runtime state's "mirror" says was not drawn. No board
+found: the comments and closes still go, the cards wait, and the answer says "behind: no board".
+Labels are never written.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from contextlib import suppress
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import unquote
+
+PLUGIN = Path(__file__).resolve().parent.parent
+THRESHOLD = {"day": 90, "away": 98}
+RESERVE = 5
+CEILING = 80
+LOOK_BACK = 5  # steps of a role the look-ahead takes its largest cost from
+RETRY_MINUTES = 10
+UNREADABLE_LIMIT = 3
+SILENCE = timedelta(minutes=20)  # spec: Revival, dead
+PAUSE_GRACE = timedelta(minutes=15)
+CRASHES = 2  # a ticket in progress during this many crashes needs the builder
+REVIVALS = 3  # the revival that ends the shift
+STOPS = 3  # blocked stops without progress that stall the ticket in progress (map #15)
+STALLS = 3  # stalled tickets in a row that end the shift
+CLASS_BY_LABEL = {"ready-for-human": "human", "ready-for-agent": "agent"}
+CLASSES = ("agent", "human-verified", "human")
+ROLES = ("prescan", "implementer", "reviewer", "fixer", "verifier")  # GLOSSARY: Role
+VERDICTS = ("met", "not met", "needs your run")  # ADR 0003
+STATES = ("Backlog", "Ready", "In progress", "Needs you", "Stalled", "Done")  # spec: States
+REASONS = ("blocker", "human-verify", "human", "set aside after a crash")  # spec: needs-you
+
+
+def out(obj, code=0):
+    print(json.dumps(obj))
+    sys.exit(code)
+
+
+def refuse(why):
+    out({"ok": False, "refused": why}, 1)
+
+
+def run(*cmd, env=None):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, env=env).stdout.strip()
+
+
+def home():
+    return Path(os.environ.get("THIRD_SHIFT_HOME", Path.home() / ".third-shift"))
+
+
+def write_atomic(path, text):
+    """A whole file or none: a reader never sees half a write. One temp per process, as hooks
+    run in parallel."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def runtime(repo):
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or {".", ".."} & set(repo.split("/")):
+        refuse(f"not an owner/repo name: {repo}")
+    return home() / repo / "state.json"
+
+
+def ledger_path(spec):
+    slug = re.sub(r"[^a-z0-9]+", "-", spec["title"].lower()).strip("-")
+    return Path("docs/third-shift-ledger") / (f"{spec['number']}-{slug}".rstrip("-") + ".json")
+
+
+def frontier_state(blockers):
+    return "Backlog" if any(b["state"] == "open" for b in blockers) else "Ready"
+
+
+def write_ledger(path, ledger):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ledger, indent=2) + "\n")
+    o = ledger["opening"]
+    rows = [f"| #{t['number']} | {t['title']} | {t['class']} | {ledger['tickets'][str(t['number'])]['state']} |"
+            for t in o["tickets"]]
+    path.with_suffix(".md").write_text("\n".join([
+        f"# Ledger: #{o['spec']['number']} {o['spec']['title']}", "",
+        "Generated from the JSON beside it by the state script; do not edit.", "",
+        f"Branch `{o['branch']}` from `{o['base_commit']}` · third-shift {o['version']} · "
+        f"{o['mode']} mode, threshold {o['threshold']}%, ceiling "
+        f"{'waived' if o['ceiling'] is None else str(o['ceiling']) + '%'} · end state {o['end_state']}",
+        "", "| Ticket | Title | Class | State |", "| --- | --- | --- | --- |", *rows, ""]))
+    if "end" in ledger:  # ADR 0002: the handover copy sits beside the ledger; cleaned as the comment is
+        path.with_suffix(".handover.md").write_text(handover(ledger).replace(
+            str(path.absolute().parents[2]), ".").replace(str(Path.home()), "~") + "\n")
+
+
+def commit_ledger(path, branch, message, *also):
+    paths = [str(p) for p in (path, path.with_suffix(".md"), path.with_suffix(".handover.md"))
+             if p.exists()]
+    if run("git", "status", "--porcelain", "--", *paths):
+        run("git", "add", *paths)
+        run("git", "commit", "-q", "-m", message, "--", *paths)  # only the ledger, never staged work
+    # even when unchanged: retries a failed push; atomic, so `also` refs move with it or not at all
+    run("git", "push", "-q", "-u", "--atomic", "origin", branch, *also)
+
+
+def arm(a):
+    prescan = json.loads(Path(a.prescan).read_text())
+    sitting = json.loads(Path(a.sitting).read_text())
+    state_file = runtime(prescan["repo"])
+    if state_file.exists() and json.loads(state_file.read_text()).get("armed"):
+        refuse(f"a shift is already armed for {prescan['repo']}")
+    ceiling = None if a.ceiling == "none" else int(a.ceiling)
+    if ceiling is not None and not 0 <= ceiling <= 100:
+        refuse(f"the ceiling must be 0 to 100, or none: {a.ceiling}")
+    if a.watchman is not None and (not a.watchman.strip() or a.watchman.splitlines() != [a.watchman]):
+        refuse(f"the watchman's task id must be one non-blank line: {a.watchman!r}")
+    failed = [c["name"] for c in prescan["checks"] if not c["ok"] and c.get("mode", a.mode) == a.mode]
+    if failed:
+        refuse(f"checks failed: {', '.join(failed)}")
+    unanswered = [g["question"] for g in sitting["gaps"] if not (g.get("answer") or "").strip()]
+    if unanswered:
+        refuse(f"gaps unanswered: {'; '.join(unanswered)}")
+    tickets = []
+    done = {t["number"] for t in prescan["tickets"] if t["state"] == "closed"}
+    for t in prescan["tickets"]:
+        cls = sitting["classes"].get(str(t["number"])) or next(
+            (CLASS_BY_LABEL[l] for l in t["labels"] if l in CLASS_BY_LABEL), None)
+        if not cls:
+            refuse(f"ticket #{t['number']} is unclassed")
+        if cls not in CLASSES:
+            refuse(f"ticket #{t['number']} has an unknown class: {cls}")
+        # a blocker outside the ticket set counts as open until `next` reads its state
+        state = ("Done" if t["state"] == "closed" else "Needs you" if cls == "human"
+                 else frontier_state([{"state": "open"} for b in t["blocked_by"] if b not in done]))
+        tickets.append({"number": t["number"], "title": t["title"], "class": cls,
+                        "starting_state": state, "blocked_by": t["blocked_by"],
+                        "criteria": t["criteria"]})
+    if default_branch()[1] != prescan["base_commit"]:  # ADR 0005: the base is the default branch
+        refuse("the base commit has moved since the prescan")
+
+    spec = prescan["spec"]
+    rel = ledger_path(spec)
+    top = run("git", "rev-parse", "--show-toplevel")
+    path = Path(top) / rel
+    branch = f"third-shift/{path.stem}"
+    ledger = {
+        "opening": {
+            "spec": spec, "repo": prescan["repo"], "branch": branch,
+            "base_commit": prescan["base_commit"],
+            "version": json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"],
+            "mode": a.mode, "threshold": THRESHOLD[a.mode], "reserve": RESERVE,
+            "ceiling": ceiling, "end_state": sitting["end_state"],
+            "baseline_seconds": prescan["baseline_seconds"],
+            "proven_commit": prescan["proven_commit"],
+            "binding_sources": sitting["binding_sources"], "gaps": sitting["gaps"],
+            "warnings": prescan["warnings"] + sitting["warnings"],
+            "tickets": tickets,
+        },
+        "tickets": {str(t["number"]): {"state": t["starting_state"]} for t in tickets},
+    }
+    copies = {state_file.with_name(f"{n}.json"): Path(f).read_text()
+              for n, f in (("prescan", a.prescan), ("sitting", a.sitting))}
+    prior = {f: f.read_text() if f.exists() else None for f in (state_file, *copies)}  # rollback
+    was_on = run("git", "branch", "--show-current") or prescan["base_commit"]
+    run("git", "checkout", "-q", "-b", branch, prescan["base_commit"])
+    md = path.with_suffix(".md")
+    try:
+        write_ledger(path, ledger)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        for f, content in copies.items():  # spec: Records, kept on the Mac
+            f.write_text(content)
+        write_atomic(state_file, json.dumps({
+            "armed": True, "gen": 1, "spec": spec["number"], "ledger": str(rel),
+            "shift_state": "running", "since": now(),
+            "target": top, **({"watchman": a.watchman} if a.watchman else {})}) + "\n")  # the heartbeat's claim checks the folder
+        commit_ledger(path, branch, f"ledger: #{spec['number']} armed")  # the push is last
+    except Exception:  # leave nothing behind, so arm can run again
+        subprocess.run(["git", "rm", "-q", "-f", "--cached", "--ignore-unmatch", "--",
+                        str(path), str(md)], capture_output=True)
+        for f, content in prior.items():
+            if content is not None:
+                write_atomic(f, content)
+        for f in (path, md, *(f for f, c in prior.items() if c is None)):
+            with suppress(OSError):
+                f.unlink()
+        for d in (state_file.parent, path.parent):
+            with suppress(OSError):
+                os.removedirs(d)  # only the folders left empty
+        subprocess.run(["git", "checkout", "-q", was_on], capture_output=True)
+        subprocess.run(["git", "branch", "-q", "-D", branch], capture_output=True)
+        raise
+    log = state_file.with_name("refusals.jsonl")  # a new shift starts its own; the old is kept
+    if log.exists():
+        log.rename(log.with_name(f"refusals.{re.sub(r'[^0-9T]', '', now()[:19])}Z.jsonl"))
+    out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel),
+         **mirror(prescan["repo"], path, ledger)})
+
+
+def default_branch():
+    """The default branch of origin and its commit, read live."""
+    head = re.search(r"^ref: refs/heads/(\S+)\tHEAD\n(\w+)\tHEAD$",
+                     run("git", "ls-remote", "--symref", "origin", "HEAD"), re.M)
+    if not head:
+        refuse("cannot tell the default branch of origin")
+    return head[1], head[2]
+
+
+def gh_list(path):
+    return [json.loads(l) for l in run("gh", "api", "--paginate", path, "--jq", ".[]").splitlines()]
+
+
+def this_repo():
+    return json.loads(run("gh", "repo", "view", "--json", "nameWithOwner"))["nameWithOwner"]
+
+
+def load(gen=None):
+    """The armed shift's repo, ledger path and ledger, after the lease and branch checks."""
+    repo = this_repo()
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    if not state.get("armed"):
+        refuse(f"no shift is armed for {repo}")
+    if gen is not None and gen != state["gen"]:
+        with state_file.with_name("refusals.jsonl").open("a") as f:  # spec: refused and logged
+            f.write(json.dumps({"at": now(), "command": sys.argv[1], "gen": gen,
+                                "lease": state["gen"]}) + "\n")
+        out({"ok": False, "lease": "lost", "stop": True,
+             "refused": f"--gen {gen} is stale; the lease is at generation {state['gen']}"}, 2)
+    branch = f"third-shift/{Path(state['ledger']).stem}"  # checked before the ledger is read
+    top, on = run("git", "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD").splitlines()
+    if on != branch:  # one git call for both: every command pays for each process
+        refuse(f"not on the shift branch {branch}")
+    path = Path(top) / state["ledger"]
+    return repo, path, json.loads(path.read_text())
+
+
+def next_(a):
+    repo, path, ledger = load(a.gen)
+    spec = ledger["opening"]["spec"]["number"]
+    closed = {i["number"] for i in gh_list(f"repos/{repo}/issues/{spec}/sub_issues")
+              if i["state"] == "closed"}
+    for n, t in ledger["tickets"].items():
+        if int(n) in closed:
+            t["state"] = "Done"
+        elif t["state"] in ("Backlog", "Ready"):
+            t["state"] = frontier_state(gh_list(f"repos/{repo}/issues/{n}/dependencies/blocked_by"))
+    write_ledger(path, ledger)
+    commit_ledger(path, ledger["opening"]["branch"], f"ledger: #{spec} frontier")
+    first = next((t for t in ledger["opening"]["tickets"]
+                  if ledger["tickets"][str(t["number"])]["state"] == "Ready"), None)
+    out({"ok": True, "ticket": first and {"number": first["number"], "title": first["title"]},
+         **({} if first else {"frontier": "empty"}), **mirror(repo, path, ledger)})
+
+
+def save(path, ledger, message, *also):
+    """Write, commit and push the ledger; on any failure put the files, index and HEAD back."""
+    md, hand = path.with_suffix(".md"), path.with_suffix(".handover.md")
+    prior = (path.read_text(), md.read_text(), run("git", "rev-parse", "HEAD"),
+             hand.read_text() if hand.exists() else None)
+    try:
+        write_ledger(path, ledger)
+        commit_ledger(path, ledger["opening"]["branch"], message, *also)
+    except Exception:  # a refusal writes nothing
+        subprocess.run(["git", "reset", "-q", "--soft", prior[2]], capture_output=True)
+        subprocess.run(["git", "reset", "-q", "--", str(path), str(md), str(hand)], capture_output=True)
+        path.write_text(prior[0])
+        md.write_text(prior[1])
+        if prior[3] is None:
+            hand.unlink(missing_ok=True)
+        else:
+            hand.write_text(prior[3])
+        raise
+
+
+def ticket(ledger, n, *states):
+    t = ledger["tickets"].get(str(n))
+    if t is None:
+        refuse(f"#{n} is not a ticket of this shift")
+    if t["state"] not in states:
+        refuse(f"#{n} is {t['state']}, not {' or '.join(states)}")
+    return t
+
+
+def criteria(body):
+    """The checkbox lines under a ticket's `## Acceptance criteria` heading."""
+    m = re.search(r"^## Acceptance criteria[ \t]*$(.*?)(?=^#|\Z)", body.replace("\r", ""), re.M | re.S)
+    return re.findall(r"^\s*(?:[-*+]|\d+[.)]) \[[ xX]\] (\S.*?)\s*$", m.group(1) if m else "", re.M)
+
+
+def gate(a, repo, ledger, role, limit):
+    """The usage gate (spec: Usage gate) for the next step of `role`, below `limit`."""
+    readings = [f for f in ("five_hour", "reset", "weekly") if getattr(a, f) is not None]
+    if a.guess is None:
+        refuse("--guess, the role's starting cost from the role table, is required")
+    if a.unreadable == bool(readings) or not (a.unreadable or len(readings) == 3):
+        refuse("give --5h, --reset and --weekly, or --unreadable alone")
+    state_file = runtime(repo)  # the failure count survives between boundaries
+    state = json.loads(state_file.read_text())
+
+    def end(why):  # kept, even at a refused admission: stop-check lets the session stop
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()),
+                                          "gate_end": why}) + "\n")
+        return {"gate": "end", "reason": why}
+    if state_file.with_name("STOP").exists():  # map #10: the builder's stop file ends the shift
+        return end("stop file")
+    if state["shift_state"] == "paused":
+        return {"gate": "pause-until", "until": state["until"], "resume_cron": cron(state["until"]),
+                "reason": f"the shift is paused until {state['until']}"}
+    failures = state.get("unreadable", 0) + 1 if a.unreadable else 0
+    if failures != state.get("unreadable", 0):
+        write_atomic(state_file, json.dumps({**state, "unreadable": failures}) + "\n")
+    if a.unreadable:
+        if failures >= UNREADABLE_LIMIT:
+            return end(f"usage unreadable {failures} times in a row")
+        until = (datetime.fromisoformat(now()) + timedelta(minutes=RETRY_MINUTES)).isoformat()
+        return {"gate": "retry", "retry_in_minutes": RETRY_MINUTES, "until": until,
+                "resume_cron": cron(until), "reason": "usage unreadable"}
+    ceiling, weekly = ledger["opening"]["ceiling"], max(a.weekly)
+    if ceiling is not None and weekly >= ceiling:
+        return end(f"weekly usage {weekly}% reached the ceiling {ceiling}%")
+    costs = [s["points"] for s in ledger.get("steps", []) if s["role"] == role][-LOOK_BACK:]
+    estimate = {"points": max(costs) if costs else a.guess, "guess": not costs}
+    limit = min(limit, 99)  # map ticket #6: the gate never reaches 100%, reserve or not
+    if a.five_hour >= limit:
+        why = f"5-hour usage {a.five_hour}% reached {limit}%"
+    elif a.five_hour + estimate["points"] >= 100:
+        why = f"5-hour usage {a.five_hour}% plus a {role} step of {estimate['points']} reaches 100%"
+    else:
+        return {"gate": "proceed", "estimate": estimate}
+    return {"gate": "pause-until", "until": a.reset, "resume_cron": cron(a.reset), "reason": why,
+            "estimate": estimate}
+
+
+def admit(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "Ready")
+    busy = [n for n, u in ledger["tickets"].items() if u["state"] == "In progress"]
+    if busy:
+        refuse(f"#{busy[0]} is already in progress; a shift works one ticket at a time")
+    g = gate(a, repo, ledger, "implementer", ledger["opening"]["threshold"])  # a ticket's first step
+    if g["gate"] != "proceed":
+        out({"ok": False, "refused": g["reason"], **g}, 1)
+    body = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.ticket}"))["body"] or ""
+    frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
+    if criteria(body) == frozen:
+        t["state"], event = "In progress", "admitted"
+    else:
+        t.update(state="Needs you", reason="blocker",
+                 why="its acceptance criteria changed after the prescan froze them")
+        event = "needs you"
+    save(path, ledger, f"ledger: #{a.ticket} {event}")
+    if event == "admitted":  # the implementer step is running, as after `step --begin`
+        state_file = runtime(repo)
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "step": {
+            "ticket": a.ticket, "role": "implementer", "started": now()}}) + "\n")
+    out({"ok": True, "ticket": a.ticket, **t, "estimate": g["estimate"], "now": now(),
+         **mirror(repo, path, ledger)})
+
+
+RECORD = ("round", "model", "effort", "outcome", "before_5h", "before_weekly", "after_5h",
+          "after_weekly", "start", "end", "tokens")
+
+
+def step(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    state_file = runtime(repo)
+    if a.begin:  # an admitted ticket's later steps may use the reserve
+        o = ledger["opening"]
+        g = gate(a, repo, ledger, a.role, o["threshold"] + o["reserve"])
+        state = json.loads(state_file.read_text())  # the gate may have written it
+        state.pop("step", None)
+        if g["gate"] == "proceed":  # stop-check lets a session waiting on the spawn stop
+            state["step"] = {"ticket": a.ticket, "role": a.role, "started": now()}
+        write_atomic(state_file, json.dumps(state) + "\n")
+        out({"ok": True, "ticket": a.ticket, **g, "now": now()})
+    a.end = a.end or now()  # the loop has no clock of its own: prompts are refused after arm
+    missing = [f"--{f.replace('_', '-')}" for f in RECORD if getattr(a, f) is None]
+    if missing:
+        refuse(f"a step record needs {', '.join(missing)}")
+    if datetime.fromisoformat(a.end) < datetime.fromisoformat(a.start):
+        refuse(f"--end {a.end} is before --start {a.start}")
+    points = a.after_5h - a.before_5h  # whole points; usage is account-wide
+    ledger.setdefault("steps", []).append({
+        "ticket": a.ticket, "role": a.role, "round": a.round, "model": a.model,
+        "effort": a.effort, "before": {"5h": a.before_5h, "weekly": a.before_weekly},
+        "after": {"5h": a.after_5h, "weekly": a.after_weekly},
+        "start": a.start, "end": a.end, "tokens": a.tokens, "outcome": a.outcome,
+        # the window reset during the step: only the new window's points are known
+        **({"points": points} if points >= 0 else {"points": a.after_5h, "lower_bound": True})})
+    t["usage"] = t.get("usage", 0) + ledger["steps"][-1]["points"]
+    save(path, ledger, f"ledger: #{a.ticket} step")
+    state = json.loads(state_file.read_text())
+    if state.get("step", {}).get("ticket") == a.ticket and state["step"]["role"] == a.role:
+        state.pop("step")
+        write_atomic(state_file, json.dumps(state) + "\n")
+    out({"ok": True, "step": ledger["steps"][-1], **mirror(repo, path, ledger)})
+
+
+def done(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    c = a.comment  # inline JSON (one argument, so one permission-matched command), "-" or a file
+    rows = json.loads(c if c.startswith("[") else sys.stdin.read() if c == "-" else Path(c).read_text())
+    frozen = next(o["criteria"] for o in ledger["opening"]["tickets"] if o["number"] == a.ticket)
+    if not frozen:
+        refuse(f"#{a.ticket} has no frozen criteria to close against")
+    if not isinstance(rows, list) or sorted(r.get("criterion") for r in rows) != sorted(frozen):
+        refuse(f"#{a.ticket} needs exactly one row per frozen criterion: {frozen}")
+    pinned = re.compile(rf"https://github\.com/{re.escape(repo)}/blob/([0-9a-f]{{40}})/([^#?\s]+)"
+                        r"(?:#L[1-9]\d*(?:-L[1-9]\d*)?)?")
+    top = run("git", "rev-parse", "--show-toplevel")  # git resolves ./ and ../ against the cwd
+    for r in rows:
+        if r.get("verdict") not in VERDICTS:
+            refuse(f"no verdict for {r['criterion']!r}; one of {', '.join(VERDICTS)}")
+        m = pinned.fullmatch(r.get("evidence_url") or "")
+        file = m and unquote(m[2])
+        kind = (m and not {"", ".", ".."} & set(file.split("/"))
+                and Path(top, file) not in (path, path.with_suffix(".md"))
+                and subprocess.run(["git", "cat-file", "-t", f"{m[1]}:{file}"], cwd=top,
+                                   capture_output=True, text=True).stdout.strip())
+        if kind != "blob" or subprocess.run(  # on the shift branch, so the permalink resolves
+                ["git", "merge-base", "--is-ancestor", m[1], "HEAD"], capture_output=True).returncode:
+            refuse(f"no commit-pinned evidence in this repo for {r['criterion']!r}")
+        if r["verdict"] == "not met":
+            refuse(f"{r['criterion']!r} is not met")
+    unrun = [r["criterion"] for r in rows if r["verdict"] == "needs your run"]
+    t["verdicts"] = rows
+    if unrun:
+        t.update(state="Needs you", reason="human-verify",
+                 why=f"needs your run: {'; '.join(unrun)}")
+    else:
+        t["state"] = "Done"
+    save(path, ledger, f"ledger: #{a.ticket} {t['state'].lower()}")
+    # the mirror posts the resolution comment, and closes the issue only when Done (map #8)
+    out({"ok": True, "ticket": a.ticket, **t, "comment": table(rows), **mirror(repo, path, ledger)})
+
+
+def needs_you(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    leave(path, ledger, a.ticket, "needs you", state="Needs you", reason=a.reason, why=a.why)
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
+
+
+def stall(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "In progress")
+    leave(path, ledger, a.ticket, "stalled", state="Stalled", why=a.why)
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
+
+
+def leave(path, ledger, n, event, **update):
+    """Move ticket n out of In progress, its uncommitted work set aside on a named ref."""
+    t = ledger["tickets"][str(n)]
+    ref = set_aside(path, f"{event.replace(' ', '-')}-{n}-{len(t.get('set_aside', [])) + 1}",
+                    f"third-shift: #{n} {event}")
+    t.update(update)
+    if ref:
+        t.setdefault("set_aside", []).append(ref)
+    save_aside(path, ledger, f"ledger: #{n} {event}", ref)
+    state_file = runtime(ledger["opening"]["repo"])  # its running step, if any, ends with it
+    state = json.loads(state_file.read_text())
+    if state.pop("step", None):
+        write_atomic(state_file, json.dumps(state) + "\n")
+    return ref
+
+
+def release(a):
+    repo, path, ledger = load(a.gen)
+    t = ticket(ledger, a.ticket, "Needs you")
+    t.setdefault("released", []).append(  # the question stays beside the builder's answer
+        {"reason": t.pop("reason", None), "why": t.pop("why", None), "decision": a.decision})
+    t["state"] = frontier_state(gh_list(f"repos/{repo}/issues/{a.ticket}/dependencies/blocked_by"))
+    save(path, ledger, f"ledger: #{a.ticket} released")
+    state_file = runtime(repo)  # work is back on the frontier, so waiting is over
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] == "waiting":
+        write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
+    out({"ok": True, "ticket": a.ticket, **t, **mirror(repo, path, ledger)})
+
+
+def note(a):
+    _, path, ledger = load(a.gen)
+    ticket(ledger, a.ticket, *STATES)
+    if (a.kind == "owed") != (a.for_ is not None):
+        refuse("an owed finding, and only an owed finding, names its later ticket with --for")
+    if a.for_ is not None:
+        ticket(ledger, a.for_, *STATES[:-1])  # Done can carry nothing
+        if a.for_ == a.ticket:
+            refuse(f"#{a.ticket} cannot owe a finding to itself")
+    ledger.setdefault("notes", []).append({"kind": a.kind, "ticket": a.ticket, "text": a.text,
+                                           **({"for": a.for_} if a.for_ else {})})
+    save(path, ledger, f"ledger: #{a.ticket} {a.kind}")
+    out({"ok": True, "note": ledger["notes"][-1]})
+
+
+def wait(a):
+    repo, path, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "running":
+        refuse(f"the shift is {state['shift_state']}, not running")
+    moving = remaining(ledger)  # Backlog behind a Needs you ticket waits with it
+    if moving:
+        refuse(f"tickets can still move: {', '.join(moving)}")
+    write_atomic(state_file, json.dumps({**state, "shift_state": "waiting"}) + "\n")
+    out({"ok": True, "shift_state": "waiting", **mirror(repo, path, ledger)})
+
+
+def ceiling(a):
+    """Raise or waive the weekly ceiling mid-shift (map #6, decision 5)."""
+    repo, path, ledger = load(a.gen)
+    o = ledger["opening"]
+    ledger.setdefault("ceilings", []).append({"from": o["ceiling"], "ceiling": a.value, "at": now()})
+    o["ceiling"] = a.value
+    save(path, ledger, f"ledger: #{o['spec']['number']} ceiling")
+    out({"ok": True, "ceiling": a.value, **mirror(repo, path, ledger)})
+
+
+def pause(a):
+    repo, path, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "running":
+        refuse(f"the shift is {state['shift_state']}, not running")
+    ledger.setdefault("pauses", []).append({"reason": a.reason, "until": a.until, "at": now()})
+    save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} paused")
+    write_atomic(state_file, json.dumps({**state, "shift_state": "paused", "until": a.until,
+                                      "pause": a.reason}) + "\n")
+    out({"ok": True, "shift_state": "paused", "until": a.until, "resume_cron": cron(a.until),
+         **mirror(repo, path, ledger)})
+
+
+def resume(a):
+    repo, path, ledger = load(a.gen)
+    state_file = runtime(repo)
+    state = json.loads(state_file.read_text())
+    if state["shift_state"] != "paused":
+        refuse(f"the shift is {state['shift_state']}, not paused")
+    ledger["pauses"][-1]["resumed"] = now()
+    save(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} resumed")
+    state.pop("until", None)
+    state.pop("pause", None)
+    write_atomic(state_file, json.dumps({**state, "shift_state": "running"}) + "\n")
+    out({"ok": True, "shift_state": "running", **mirror(repo, path, ledger)})
+
+
+def cron(until):
+    """A one-off 5-field cron at `until` plus 3 minutes, in this machine's local time (TZ),
+    for CronCreate: the loop cannot run a converter after arm."""
+    t = (datetime.fromisoformat(until) + timedelta(minutes=3)).astimezone()
+    return f"{t.minute} {t.hour} {t.day} {t.month} *"
+
+
+def now():
+    return (os.environ.get("THIRD_SHIFT_NOW")  # the suite's clock
+            or datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+
+def end(a):
+    out(finish(*load(a.gen), a.reason, a.findings, a.candidates))
+
+
+def finish(repo, path, ledger, reason, findings=None, candidates=None, **extra):
+    o = ledger["opening"]
+    top, private = str(path.parents[2]), str(Path.home())  # the handover may be public
+    given = [f and redact((  # inline one-line JSON (no files after arm, #37), or a file
+        "\n".join(f"- {' '.join(x.split())}" for x in json.loads(f)) if f.startswith("[")
+        else Path(f).read_text()).replace(top, ".").replace(private, "~"), 20000).strip()
+             for f in (findings, candidates)]
+    known = {t["number"] for t in o["tickets"]}
+    try:  # the one tracker read: sub-issues the prescan did not see
+        added = [{"number": i["number"], "title": i["title"]} for i in
+                 gh_list(f"repos/{repo}/issues/{o['spec']['number']}/sub_issues")
+                 if i["number"] not in known]
+    except Exception:  # an unreadable tracker does not keep a shift from ending
+        added = None
+    also = []
+    if o["end_state"] == "fast-forward":  # spec: the end state is applied at `end`
+        also = [f"{o['branch']}:refs/heads/{default_branch()[0]}"]  # a plain push: refused unless a fast-forward
+    log = runtime(repo).with_name("refusals.jsonl")  # spec: a refusal is never lost
+    ledger["end"] = {"reason": reason, "end_state": o["end_state"], "findings": given[0],
+                     "candidates": given[1], "added": added, "refused_off_ledger":
+                     [json.loads(r) for r in log.read_text().splitlines()] if log.exists() else []}
+    save(path, ledger, f"ledger: #{o['spec']['number']} ended", *also)
+    state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
+    state = json.loads(state_file.read_text())
+    write_atomic(state_file, json.dumps({**state, "armed": False,
+                                      "shift_state": "ended"}) + "\n")
+    state_file.with_name("STOP").unlink(missing_ok=True)  # spent: it stopped this shift, not the next
+    return {"ok": True, **extra, "shift_state": "ended", "end_state": o["end_state"],
+            "watchman": state.get("watchman"),  # the skill removes the scheduled task
+            **mirror(repo, path, ledger)}
+
+
+# The tracker mirror (spec: The mirror). The ledger is the record (ADR 0002): every command
+# writes and pushes it first, then redraws what changed, best effort. What was drawn is kept in
+# runtime state ("mirror"), so a failed write is redrawn by the next command that mirrors.
+COLORS = ("GRAY", "BLUE", "YELLOW", "RED", "ORANGE", "GREEN")  # one per column, in STATES order
+OPTIONS = "options { id name color description }"
+BOARD = ("id number title url repositories(first: 50) { nodes { nameWithOwner } } "
+         f"fields(first: 50) {{ nodes {{ ... on ProjectV2FieldCommon {{ id name }} "
+         f"... on ProjectV2SingleSelectField {{ {OPTIONS} }} }} }} views(first: 50) {{ nodes {{ id name }} }}")
+FIELD = f"projectV2Field {{ ... on ProjectV2FieldCommon {{ id name }} ... on ProjectV2SingleSelectField {{ {OPTIONS} }} }}"
+lit = lambda s: json.dumps(s, ensure_ascii=False)  # a JSON string is a GraphQL string literal; UTF-8, not surrogate escapes
+
+
+def graphql(document, **variables):
+    return json.loads(run("gh", "api", "graphql", "-f", f"query={document}",
+                          *(x for k, v in variables.items() for x in ("-f", f"{k}={v}"))))["data"]
+
+
+def find_board(repo):
+    """The repo's node and the board titled `third-shift: <repo>` (ADR 0006), or None."""
+    owner, name = repo.split("/")
+    title = f"third-shift: {name}"
+    r = graphql("query Board($owner: String!, $name: String!, $title: String!) { repository(owner: "
+                "$owner, name: $name) { id owner { id ... on ProjectV2Owner { projectsV2(first: 20, "
+                f"query: $title) {{ nodes {{ {BOARD} }} }} }} }} }} }}",
+                owner=owner, name=name, title=title).get("repository")
+    p = r and next((p for p in r["owner"]["projectsV2"]["nodes"] if p["title"] == title), None)
+    return r, title, p
+
+
+def spec_option(spec):
+    return f"#{spec['number']} {spec['title']}"
+
+
+def board_ids(p, items):
+    """The ids the mirror writes by, from a board's node: cached, a speed-up only."""
+    f = {x["name"]: x for x in p["fields"]["nodes"] if x}
+    return {"id": p["id"], "number": p["number"], "url": p["url"], "status": f["Status"]["id"],
+            "columns": {o["name"]: o["id"] for o in f["Status"]["options"]},
+            "spec": f["Spec"]["id"], "why": f["Why"]["id"], "items": items,
+            "specs": {m[1]: o["id"] for o in f["Spec"]["options"]
+                      if (m := re.match(r"#(\d+) ", o["name"]))}}
+
+
+def setup_board(a):
+    repo = this_repo()
+    cache = runtime(repo).with_name("board.json")
+    spec = json.loads(run("gh", "api", f"repos/{repo}/issues/{a.spec}"))
+    name = spec_option(spec)
+    r, title, p = find_board(repo)
+    if not r:
+        refuse(f"cannot read {repo} and its owner's boards; is the project scope granted?")
+    made = []
+    if not p:  # linked at birth
+        p = graphql(f"mutation CreateBoard {{ createProjectV2(input: {{ownerId: {lit(r['owner']['id'])}, "
+                    f"title: {lit(title)}, repositoryId: {lit(r['id'])}}}) {{ projectV2 {{ {BOARD} }} }} }}"
+                    )["createProjectV2"]["projectV2"]
+        made.append("board")
+    elif repo not in [x["nameWithOwner"] for x in p["repositories"]["nodes"]]:
+        graphql(f"mutation Link {{ linkProjectV2ToRepository(input: {{projectId: {lit(p['id'])}, "
+                f"repositoryId: {lit(r['id'])}}}) {{ clientMutationId }} }}")
+        made.append("link")
+    fields = {x["name"]: x for x in p["fields"]["nodes"] if x}
+
+    def options(opts):
+        return "[" + ", ".join(f"{{{'id: ' + lit(o['id']) + ', ' if o.get('id') else ''}name: "
+                               f"{lit(o['name'])}, color: {o['color']}, description: "
+                               f"{lit(o.get('description') or '')}}}" for o in opts) + "]"
+
+    def update(alias, field, opts):  # replaces the options; passing ids back keeps the cards
+        fields[alias] = graphql(f"mutation {alias.title()}Options {{ updateProjectV2Field(input: "
+                                f"{{fieldId: {lit(field['id'])}, singleSelectOptions: {options(opts)}}}) "
+                                f"{{ {FIELD} }} }}")["updateProjectV2Field"]["projectV2Field"]
+        made.append(alias.lower())
+
+    def create(alias, kind, opts=None):
+        fields[alias] = graphql(f"mutation {alias}Field {{ createProjectV2Field(input: {{projectId: "
+                                f"{lit(p['id'])}, dataType: {kind}, name: {lit(alias)}"
+                                + (f", singleSelectOptions: {options(opts)}" if opts else "")
+                                + f"}}) {{ {FIELD} }} }}")["createProjectV2Field"]["projectV2Field"]
+        made.append(alias.lower())
+
+    status = fields["Status"]
+    if [o["name"] for o in status["options"]] != list(STATES):
+        have = {o["name"].lower(): o["id"] for o in status["options"]}  # a new board's In Progress
+        update("Status", status, [{"id": have.get(s.lower()), "name": s, "color": c}
+                                  for s, c in zip(STATES, COLORS)])
+    if "Spec" not in fields:
+        create("Spec", "SINGLE_SELECT", [{"name": name, "color": "GRAY"}])
+    elif name not in [o["name"] for o in fields["Spec"]["options"]]:
+        update("Spec", fields["Spec"], [*fields["Spec"]["options"], {"name": name, "color": "GRAY"}])
+    if "Why" not in fields:
+        create("Why", "TEXT")
+    if name not in [v["name"] for v in p["views"]["nodes"]]:
+        view = graphql(f"mutation View {{ createProjectV2View(input: {{projectId: {lit(p['id'])}, "
+                       f"name: {lit(name)}, layout: BOARD_LAYOUT}}) {{ projectV2View {{ id }} }} }}"
+                       )["createProjectV2View"]["projectV2View"]["id"]
+        graphql(f"mutation ViewFilter {{ updateProjectV2View(input: {{viewId: {lit(view)}, "
+                f"filter: {lit(f'spec:{lit(name)}')}}}) {{ clientMutationId }} }}")
+        made.append("view")
+    p["fields"]["nodes"] = list(fields.values())
+    old = json.loads(cache.read_text()) if cache.exists() else {}
+    old = old.get("items", {}) if old.get("id") == p["id"] else {}  # a recreated board's cards are new
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(cache, json.dumps(board_ids(p, old)) + "\n")
+    out({"ok": True, "board": {"number": p["number"], "url": p["url"], "title": title},
+         "made": made})
+
+
+def mirror(repo, path, ledger):
+    """Redraws the changed cards, the shift status comment and any resolution; best effort.
+    Returns {} or {"mirror": "behind: <why>"}; never fails the command."""
+    try:
+        state_file = runtime(repo)
+        cache = state_file.with_name("board.json")
+        if cache.exists():
+            board = json.loads(cache.read_text())
+        else:  # another Mac: the board is found by its title (ADR 0006)
+            _, _, p = find_board(repo)
+            board = p and board_ids(p, {})  # no board: comments and closes still go, cards wait
+            if board:
+                write_atomic(cache, json.dumps(board) + "\n")
+        state = json.loads(state_file.read_text())
+        drawn = state.get("mirror") or {"cards": {}, "resolved": {}}
+        clean = lambda s: s.replace(state["target"], ".").replace(str(Path.home()), "~")
+
+        def keep():  # each part is recorded as soon as it is drawn
+            write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()),
+                                                 "mirror": drawn}) + "\n")
+        o = ledger["opening"]
+        spec = str(o["spec"]["number"])
+        if board and spec not in board["specs"]:
+            raise RuntimeError(f"the board has no Spec option for #{spec}; run setup-board --spec {spec}")
+        want = {n: {"status": t["state"], "why": clean(t["why"]) if t["state"] == "Needs you"
+                    and t.get("why") else None} for n, t in ledger["tickets"].items()}
+        changed = [n for n in want if drawn["cards"].get(n) != want[n] or n not in board["items"]] if board else []
+        new = [n for n in changed if n not in board["items"]]
+        if new:  # adding an issue already on the board returns its card
+            owner, name = repo.split("/")
+            nodes = graphql(f"query Issues {{ repository(owner: {lit(owner)}, name: {lit(name)}) {{ "
+                            + " ".join(f"i{n}: issue(number: {n}) {{ id }}" for n in new)
+                            + " } }")["repository"]
+            items = graphql("mutation AddCards { " + " ".join(
+                f"c{n}: addProjectV2ItemById(input: {{projectId: {lit(board['id'])}, contentId: "
+                f"{lit(nodes[f'i{n}']['id'])}}}) {{ item {{ id }} }}" for n in new) + " }")
+            board["items"].update({n: items[f"c{n}"]["item"]["id"] for n in new})
+            write_atomic(cache, json.dumps(board) + "\n")
+        if changed:
+            def edit(alias, n, field, value=None):
+                ids = (f"projectId: {lit(board['id'])}, itemId: {lit(board['items'][n])}, "
+                       f"fieldId: {lit(field)}")
+                if value is None:
+                    return f"{alias}{n}: clearProjectV2ItemFieldValue(input: {{{ids}}}) {{ clientMutationId }}"
+                return (f"{alias}{n}: updateProjectV2ItemFieldValue(input: {{{ids}, value: {value}}}) "
+                        "{ clientMutationId }")
+            parts = []
+            for n in changed:
+                parts += [edit("s", n, board["status"], f"{{singleSelectOptionId: {lit(board['columns'][want[n]['status']])}}}"),
+                          edit("p", n, board["spec"], f"{{singleSelectOptionId: {lit(board['specs'][spec])}}}")]
+                if want[n]["why"]:
+                    parts.append(edit("w", n, board["why"], f"{{text: {lit(want[n]['why'])}}}"))
+                elif (drawn["cards"].get(n) or {}).get("why"):
+                    parts.append(edit("w", n, board["why"]))
+            graphql("mutation Cards { " + " ".join(parts) + " }")
+            drawn["cards"].update({n: want[n] for n in changed})
+            keep()
+        for n, t in ledger["tickets"].items():  # a resolution per set of verdicts, then the close
+            if "verdicts" not in t:
+                continue
+            rows = hashlib.sha256(json.dumps(t["verdicts"]).encode()).hexdigest()
+            r = drawn["resolved"].get(n) or {}
+            if r.get("rows") != rows:
+                verdict = "Done" if t["state"] == "Done" else "Needs your run, so left open"
+                run("gh", "api", f"repos/{repo}/issues/{n}/comments", "-X", "POST", "-f",
+                    "body=" + clean(f"### Resolution: {verdict}\n\n{table(t['verdicts'])}\n"))
+                r = drawn["resolved"][n] = {"rows": rows, "closed": False}
+                keep()
+            if t["state"] == "Done" and not r["closed"]:
+                run("gh", "api", f"repos/{repo}/issues/{n}", "-X", "PATCH", "-f", "state=closed",
+                    "-f", "state_reason=completed")
+                r["closed"] = True
+                keep()
+        body = clean(status_body(ledger, path, json.loads(state_file.read_text())))
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        if drawn.get("comment_hash") != digest:
+            marker = body.split("\n", 1)[0]
+            cid = drawn.get("comment") or next(  # created once, even if its id was never kept
+                (c["id"] for c in gh_list(f"repos/{repo}/issues/{spec}/comments")
+                 if c["body"].startswith(marker)), None)
+            if cid:
+                run("gh", "api", f"repos/{repo}/issues/comments/{cid}", "-X", "PATCH", "-f", f"body={body}")
+            else:
+                cid = json.loads(run("gh", "api", f"repos/{repo}/issues/{spec}/comments", "-X", "POST",
+                                     "-f", f"body={body}"))["id"]
+            drawn.update(comment=cid, comment_hash=digest)
+            keep()
+        return {} if board else {"mirror": "behind: no board"}
+    except Exception as e:  # the record stands; the next command that mirrors catches up
+        why = e.stderr.strip() if isinstance(e, subprocess.CalledProcessError) else f"{type(e).__name__}: {e}"
+        return {"mirror": f"behind: {why[:300]}"}
+
+
+def status_body(ledger, path, state):
+    """The shift status comment: the shift's state and every ticket's, each In progress
+    ticket with its latest step."""
+    o, tickets = ledger["opening"], ledger["tickets"]
+    shift = state["shift_state"]
+    if shift == "paused":
+        shift += f" ({state.get('pause')}) until {state.get('until')}"
+    elif "end" in ledger:
+        shift = f"ended: {ledger['end']['reason']}"
+    count = lambda s: sum(t["state"] == s for t in tickets.values())
+    rows = []
+    for t in o["tickets"]:
+        u = tickets[str(t["number"])]
+        if u["state"] == "In progress":
+            s = next((s for s in reversed(ledger.get("steps", [])) if s["ticket"] == t["number"]), None)
+            note = f"step: {s['role']}, round {s['round']}" if s else "admitted"
+        else:
+            note = " · ".join(x for x in (u.get("reason"), u.get("why")) if x
+                              ) if u["state"] in ("Needs you", "Stalled") else ""
+        note = note.replace("|", "\\|").replace("\n", " ")
+        rows.append(f"| #{t['number']} | {u['state']} | {note} |")
+    marker = f"<!-- third-shift status {path.stem} {o['base_commit']} -->"
+    if "end" in ledger:  # map #8: at the end the shift status becomes the handover
+        return f"{marker}\n{handover(ledger)}\n"
+    return "\n".join([
+        marker, f"### Shift status: {shift}", "",
+        f"Branch `{o['branch']}` · {count('Done')}/{len(tickets)} done · {count('Needs you')} need you"
+        f" · {count('Stalled')} stalled · {count('In progress')} in progress", "",
+        "| Ticket | State | Step or why |", "| --- | --- | --- |", *rows, ""])
+
+
+def handover(ledger):
+    """The handover (spec: The handover), from the ledger alone; `end` records in it what the
+    tracker and the model add. Its order is the spec's; it ends with the one model-free command."""
+    o, tickets, e = ledger["opening"], ledger["tickets"], ledger["end"]
+    titles = {str(t["number"]): t["title"] for t in o["tickets"]}
+    name = lambda n: f"#{n} {titles[n]}"
+    count = lambda s: sum(t["state"] == s for t in tickets.values())
+    steps, refused = ledger.get("steps", []), ledger.get("refused", []) + e.get("refused_off_ledger", [])
+    flat = lambda s: s.replace("\n", " ")  # free text: one line, so no heading can be injected
+    points = f"{'at least ' if any(s.get('lower_bound') for s in steps) else ''}" \
+             f"{sum(s['points'] for s in steps)} points"
+
+    def downstream(n):  # the open tickets that wait on n, directly or through another
+        waits, todo = [], [int(n)]
+        while todo:
+            m = todo.pop()
+            for t in o["tickets"]:
+                k = str(t["number"])
+                if m in t["blocked_by"] and k not in waits and tickets[k]["state"] != "Done":
+                    waits.append(k)
+                    todo.append(t["number"])
+        return ", ".join(f"#{k}" for k in waits) or "nothing"
+
+    need, done, left = [], [], []
+    for t in o["tickets"]:
+        n = str(t["number"])
+        u = tickets[n]
+        if u["state"] in ("Needs you", "Stalled"):
+            kind = "stalled" if u["state"] == "Stalled" else u.get("reason") or "human"
+            if kind == "human-verify":  # map #8: left open, with the steps to run
+                need.append(f"- **{name(n)}** · needs your run; close the issue after it:")
+                need += [f"  - [ ] {flat(r['criterion'])} · [steps]({r['evidence_url']})"
+                         for r in u["verdicts"] if r["verdict"] == "needs your run"]
+            else:
+                need.append(f"- **{name(n)}** · {'human work' if kind == 'human' else kind}" + (f": {flat(u['why'])}" if u.get("why") else ""))
+            need.append(f"  - waiting on it: {downstream(n)}")
+        elif u["state"] == "Done":
+            rows = u.get("verdicts")
+            done.append(f"- {name(n)} · " + (
+                f"{len(rows)} criteria met · evidence " + " ".join(
+                    f"[{i}]({r['evidence_url']})" for i, r in enumerate(rows, 1)) if rows
+                else "closed before the shift" if t["starting_state"] == "Done"
+                else "closed on the tracker, no evidence recorded"))
+        else:
+            left.append(f"{name(n)} ({u['state']})")
+    if left:
+        need.append(f"- Not reached: {', '.join(left)}")
+    nits = [f"- #{x['ticket']}: {flat(x['text'])}" for x in ledger.get("notes", []) if x["kind"] == "nit"]
+    usage = [f"| #{n} | {tickets[n]['usage']} |" for n in titles if "usage" in tickets[n]]
+    added = ("Unknown: the tracker could not be read at the end." if e["added"] is None
+             else "\n".join(f"- #{i['number']} {i['title']}" for i in e["added"]) or "None.")
+    end_state = ("the default branch fast-forwarded to it" if e["end_state"] == "fast-forward"
+                 else "the default branch untouched")
+    return "\n".join([
+        f"### {count('Done')}/{len(tickets)} done · {count('Needs you') + count('Stalled')} need you · "
+        f"{len(refused)} refused · {points}", "",
+        f"Handover of #{o['spec']['number']} {o['spec']['title']} · ended: {flat(e['reason'])} · "
+        f"work on `{o['branch']}`, {end_state}", "",
+        "#### Needs you", *(need or ["Nothing."]), "",
+        "#### Done", *(done or ["Nothing."]), "",
+        "#### Security findings (security-preflight)",
+        e["findings"] or "None.", "",
+        "#### ADR candidates (the model's view, not a decision)", e["candidates"] or "None.", "",
+        "#### Refused actions", f"{len(refused)} refused.",
+        *(f"- {r['at']} · stale lease · `{r['command']} --gen {r['gen']}` · the lease was at "
+          f"generation {r['lease']}" if "lease" in r else f"- {r['at']} · {r['by']} · "
+          + (f"#{r['ticket']} · " if r.get("ticket") else "")
+          + f"`{flat(r['input']).replace('`', chr(39))}` · {flat(r['why'])}" for r in refused), "",
+        "#### Sub-issues added after the prescan", added, "",
+        "<details><summary>Nits and per-ticket usage</summary>", "",
+        *(nits or ["No nits."]), "",
+        *(["| Ticket | Points |", "| --- | --- |", *usage] if usage else ["No steps recorded."]),
+        "", "</details>", "",
+        "Rerun all verification, model-free: `verify/checks`"])
+
+
+def table(rows):
+    cell = lambda s: s.replace("|", "\\|")
+    return "\n".join(["| Criterion | Verdict | Evidence |", "| --- | --- | --- |",
+                      *(f"| {cell(r['criterion'])} | {r['verdict']} | [evidence]({r['evidence_url']}) |"
+                        for r in rows)])
+
+
+def held(hook, strict=False):
+    """The state file of the armed shift whose lease this hook's session holds or can claim."""
+    session, cwd = hook.get("session_id"), Path(hook.get("cwd") or os.getcwd()).resolve()
+    for state_file in home().glob("*/*/state.json") if session else ():
+        try:
+            state = json.loads(state_file.read_text())
+        except ValueError:
+            if strict and owns(cwd, state_file):  # the guard fails closed in that repo
+                raise
+            continue  # an unreadable state refuses its own repo, not every other one
+        if (not state.get("armed") or state.get("session_id", session) != session
+                or session in state.get("retired", ())):  # a revived-away session never reclaims
+            continue
+        if "session_id" not in state:  # ADR 0004: the first hook since arm or revive claims it
+            target = Path(state["target"])
+            if target != cwd and target not in cwd.parents:
+                continue
+            write_atomic(state_file, json.dumps({**state, "session_id": session}) + "\n")
+        return state_file
+    return None
+
+
+def owns(cwd, state_file):
+    """Whether cwd is in the repo a state file is for, named as arm names it (gh's owner/repo).
+    Inside a repo gh cannot name, the guard cannot tell, so it counts as owned."""
+    if subprocess.run(["git", "rev-parse"], cwd=cwd, capture_output=True).returncode:
+        return False  # not a repo: no shift's
+    p = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=cwd,
+                       capture_output=True, text=True)
+    try:
+        return json.loads(p.stdout)["nameWithOwner"] == "/".join(state_file.parts[-3:-1])
+    except (ValueError, KeyError):
+        return True
+
+
+def heartbeat(a):
+    """The hook's entry point: a no-op unless an armed shift's lease is or can be this session's."""
+    state_file = held(json.loads(sys.stdin.read() or "{}"))
+    if state_file:
+        # atomic: is-dead never reads half a beat; one temp per process, as hooks run in parallel
+        write_atomic(state_file.with_name("heartbeat"), json.dumps({"at": now()}) + "\n")
+        out({"ok": True, "heartbeat": now()})
+    out({"ok": True, "heartbeat": None})
+
+
+def stop_check(a):
+    """The Stop hook's entry point (spec: Stop-hook gate); prints only the hook's decision."""
+    state_file = held(json.loads(sys.stdin.read() or "{}"))
+    if not state_file:
+        out({})
+    state = json.loads(state_file.read_text())
+    os.chdir(state["target"])  # the hook may run from a subfolder; git and save run from here
+    path = Path(state["target"]) / state["ledger"]
+    ledger = json.loads(path.read_text())
+    o = ledger["opening"]
+    if run("git", "rev-parse", "--abbrev-ref", "HEAD") != o["branch"]:
+        refuse(f"not on the shift branch {o['branch']}")
+    stop = state_file.with_name("STOP").exists()
+    if state.get("gate_end") or stop and "step" in state:  # a running step meets the gate first
+        out({})
+
+    def ended(why, moved=""):  # told once: the shift is disarmed, so the next stop is free
+        watchman = finish(o["repo"], path, ledger, why)["watchman"]
+        out({"decision": "block", "reason": f"{moved}The shift has ended: {why}. Hand over; then "
+             "stop." + (f" The watchman's task id is {watchman}." if watchman else "")})
+    if stop:  # an idle session would otherwise stay armed, its hooks live, until the watchman
+        ended("stop file")
+
+    def row(moved=""):  # three stalls in a row since this shift's arming end it, even waiting
+        subjects = run("git", "log", "--format=%s", "--", str(path))
+        outcomes = re.findall(r"^ledger: #\d+ (done|needs you|released|stalled|armed)$",
+                              subjects, re.M)
+        if outcomes[:STALLS] == ["stalled"] * STALLS:
+            ended("three stalled tickets in a row", moved)
+    row()
+    if state["shift_state"] in ("paused", "waiting") or "step" in state:
+        out({})  # a running step: its tool calls beat, and its completion notice wakes the session
+    count = state.get("stops", {}).get("ledger") == fingerprint(path) and state["stops"]["count"]
+    count = (count or 0) + 1
+    busy = next((n for n, t in ledger["tickets"].items() if t["state"] == "In progress"), None)
+    if busy and count >= STOPS:
+        ref = leave(path, ledger, busy, "stalled", state="Stalled",
+                    why=f"{STOPS} blocked stops in a row without progress")
+        count, moved = 0, (f"#{busy} stalled after {STOPS} stops in a row without progress"
+                           + (f"; its uncommitted work is set aside on {ref}" if ref else "") + ". ")
+        row(moved)
+    else:
+        moved = ""
+    idle = not busy and count >= STOPS  # story 70: nothing moves, so stop; the watchman takes over
+    if idle:
+        count = 0  # recorded, so the count never keeps rising
+    left = remaining(ledger)
+    if left:
+        write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "stops": {
+            "ledger": fingerprint(path), "count": count}}) + "\n")
+    if not left or idle:
+        out({})
+    out({"decision": "block", "reason": f"{moved}The shift has work left: {', '.join(left)}. "
+         f"Carry on (`next --gen {state['gen']}` finds the next ticket); stop only when the "
+         "frontier is empty."})
+
+
+def guard(a):
+    """The guard's entry point (PreToolUse on Bash): denies an irreversible command while this
+    session holds an armed shift's lease. A command it cannot read is denied (fails closed)."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    try:
+        state_file = held(hook, strict=True)
+    except ValueError:
+        out(deny(f"a shift's state in {home()} cannot be read"))
+    if not state_file:
+        out({})
+    try:
+        target = json.loads(state_file.read_text())["target"]
+        why = unsafe(hook["tool_input"]["command"], hook.get("cwd") or target, target)
+    except Exception as e:  # anything the guard cannot read is refused while armed
+        why = f"the guard cannot read this command ({type(e).__name__}: {e})"
+    if not why:
+        out({})
+    record(state_file, "guard", hook, why)
+    out(deny(why))
+
+
+def deny(why):
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": f"third-shift guard: {why}. A shift may push only to "
+        "third-shift/* branches and act only inside the repo; do it another way, or record "
+        "the need with needs-you."}}
+
+
+def deny_prompt(a):
+    """The PermissionRequest hook: no one answers prompts in a shift's session, so each is
+    denied; AskUserQuestion passes, as the sittings ask through it (map #17)."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    state_file = held(hook)
+    if not state_file or hook.get("tool_name") == "AskUserQuestion":
+        out({})
+    record(state_file, "prompt", hook, "a permission prompt in an unattended shift")
+    out({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {
+        "behavior": "deny", "message": "third-shift: no one is here to answer a permission "
+        "prompt during a shift. Do it another way, or record the need with needs-you."}}})
+
+
+def refused(a):
+    """The PermissionDenied hook (auto mode denied a call): logs it; the denial stands."""
+    hook = json.loads(sys.stdin.read() or "{}")
+    state_file = held(hook)
+    if state_file:
+        record(state_file, "auto", hook, hook.get("reason") or "denied by auto mode")
+    out({})
+
+
+def record(state_file, by, hook, why):
+    """Logs a refused action to the ledger (ADR 0002); off the shift branch, or if the commit
+    or push fails, to refusals.jsonl in runtime state, so a refusal is never lost."""
+    state, ti = json.loads(state_file.read_text()), hook.get("tool_input") or {}
+    private = str(Path.home())  # the ledger may be public: no machine paths
+    entry = {"at": now(), "by": by, "tool": hook.get("tool_name"),
+             "input": redact(str(ti.get("command") or ti.get("file_path") or json.dumps(ti)))
+             .replace(private, "~"), "why": redact(why).replace(private, "~")}
+    try:
+        os.chdir(state["target"])
+        path = Path(state["target"]) / state["ledger"]
+        ledger = json.loads(path.read_text())
+        if run("git", "rev-parse", "--abbrev-ref", "HEAD") != ledger["opening"]["branch"]:
+            raise RuntimeError("off the shift branch")
+        entry["ticket"] = next((int(n) for n, t in ledger["tickets"].items()
+                                if t["state"] == "In progress"), None)
+        ledger.setdefault("refused", []).append(entry)
+        save(path, ledger, "ledger: refused")
+    except Exception:
+        with state_file.with_name("refusals.jsonl").open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+SECRETS = re.compile(  # key shapes (.githooks/denylist.txt), then a secret after its prefix
+    r"(?i)sk-[\w-]{8,}|gh[pousr]_\w{20,}|github_pat_\w{20,}|AKIA[0-9A-Z]{16}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
+    r"|(://[^/\s:@]+:)[^@\s]+(?=@)"
+    r"|(bearer\s+|(?<!\S)--?(?:token|password|passwd|secret|api[-_]?key|p)[ =]"
+    r"|(?<!\S)-p(?=\S)"
+    r"|\b\w*(?:password|passwd|token|secret|api_?key)\w*[=:] ?)\S+")
+
+
+def redact(text, limit=500):
+    """A refusal as the public ledger may show it: secrets masked, then cut to a sane length."""
+    text = SECRETS.sub(lambda m: (m[1] or m[2] or "") + "[redacted]", text)
+    return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+
+# The guard's reading of a shell command. shortcut: code run by an interpreter or a script
+# (python -c, make) is read only where a string in it reads as a shell command, and a command
+# named by a variable behind a wrapper (env $g) is not seen; the guard is one layer of several.
+SEPARATORS = (";;", "&&", "||", "|&", ";", "&", "|", "(", ")", "\n")
+REDIRECTS = ("<<<", "<<-", "<<", ">>", ">&", "<&", "&>", ">|", "<", ">")
+KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "time"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "eval"}
+GIT_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+GIT_CONFIG = re.compile(r"(?i)(remote|url|alias|push|branch)\.|core\.hookspath")
+PUSH_BAD = ("--force", "--force-with-lease", "--force-if-includes", "--delete", "--mirror",
+            "--all", "--branches", "--prune", "--tags", "--follow-tags")
+PUSH_VALUE = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+SHIFT_REF = re.compile(r"(?:[^:+\s][^:\s]*:)?(?:refs/heads/)?third-shift/[\w./-]+")
+GH_BAD = re.compile(r"delete|merge|archive|rename|sync|transfer")
+GH_API_VALUE = {"-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header",
+                "--input", "-q", "--jq", "-t", "--template", "--cache", "-p", "--preview",
+                "--hostname"}
+GH_API_RISKY = re.compile(r"git/refs|/merges?\b|/contents/|/protection|/transfer|/rename"
+                          r"|^/?repos/[^/]+/[^/]+/?$")
+GH_MUTATION = re.compile(r"(?is)mutation.*(delete|remove|merge|archive|transfer|updateRef"
+                         r"|updateRepository|createCommitOnBranch)")
+DEVICES = re.compile(r"/dev/(null|stdin|stdout|stderr|tty|fd/\d+)")
+
+
+def lex(s):
+    """A shell command as words (text, quoted) and operator strings, plus the text of every
+    $(..) and `..` in it; raises on anything it cannot read. A substitution leaves `$` in its
+    word, which marks the word as unknown, as a variable does."""
+    toks, subs, docs, word, quoted, i = [], [], [], None, False, 0
+
+    def sub(i):  # the substitution starting at i: its text and the index after it
+        if s[i] == "`":
+            j = s.index("`", i + 1)
+            return s[i + 1:j], j + 1
+        depth = 0
+        for j in range(i + 1, len(s)):
+            depth += {"(": 1, ")": -1}.get(s[j], 0)
+            if not depth:
+                return s[i + 2:j], j + 1
+        raise ValueError("an unclosed $(")
+
+    def end():
+        nonlocal word, quoted
+        if word is not None:
+            if toks and toks[-1] in ("<<", "<<-"):
+                docs.append((word, quoted, toks[-1] == "<<-"))
+            toks.append((word, quoted))
+        word, quoted = None, False
+
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            word = (word or "") + s[i + 1:i + 2].replace("\n", "")
+            i += 2
+        elif c == "'":
+            j = s.index("'", i + 1)
+            word, quoted, i = (word or "") + s[i + 1:j], True, j + 1
+        elif c == '"':
+            j, part = i + 1, ""
+            while s[j] != '"':  # IndexError when unclosed
+                if s[j] == "\\" and s[j + 1] in '$`"\\\n':
+                    part, j = part + s[j + 1].replace("\n", ""), j + 2
+                elif s[j] == "`" or s.startswith("$(", j):
+                    inner, j = sub(j)
+                    subs.append(inner)
+                    part += "$"
+                else:
+                    part, j = part + s[j], j + 1
+            word, quoted, i = (word or "") + part, True, j + 1
+        elif c == "`" or s.startswith("$(", i):
+            inner, i = sub(i)
+            subs.append(inner)
+            word = (word or "") + "$"
+        elif c == "#" and word is None:
+            i = s.find("\n", i) % (len(s) + 1)  # to the newline, or the end
+        elif c in " \t\r":
+            end()
+            i += 1
+        else:
+            op = next((o for o in REDIRECTS + SEPARATORS if s.startswith(o, i)), None)
+            if not op:
+                word, i = (word or "") + c, i + 1
+                continue
+            if op[0] in "<>&" and word and word.isdigit() and not quoted:
+                word = None  # a file descriptor: 2>&1
+            end()
+            toks.append(op)
+            i += len(op)
+            while op == "\n" and docs:  # here-document bodies start on the next line
+                delim, quoted_delim, tabs = docs.pop(0)
+                body = []
+                while True:
+                    if i >= len(s):
+                        raise ValueError(f"a here-document without its {delim} line")
+                    nl = s.find("\n", i) % (len(s) + 1)
+                    line, i = s[i:nl], nl + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+                    body.append(line)
+                if not quoted_delim and re.search(r"\$\(|`", "\n".join(body)):
+                    raise ValueError("a substitution in a here-document")
+    end()
+    return toks, subs
+
+
+def unsafe(command, cwd, target, full=True):
+    """Why the guard refuses a command, or None. `full` also checks paths; a string inside a
+    command is read only for git and gh, and only as far as it lexes."""
+    roots = [os.path.realpath(target)]  # the plugin is outside: a shift never edits its guard
+    toks, subs = lex(command)
+    for inner in subs:
+        why = unsafe(inner, cwd, target)
+        if why:
+            return why
+    commands, words, redirect = [], [], False
+    for t in toks + [";"]:
+        if isinstance(t, tuple):
+            if redirect:  # a redirect's target is a path, not an argument
+                if full and outside(t, cwd, roots):
+                    return f"a path outside the repo: {t[0]}"
+            else:
+                words.append(t)
+            redirect = False
+        elif t in REDIRECTS:
+            redirect = True
+        else:
+            redirect = False
+            if words:
+                commands.append(words)
+                words = []
+    for words in commands:
+        ws = [w for w, _ in words]
+        k = 0
+        while k < len(ws) and (ws[k] in KEYWORDS or re.match(r"[A-Za-z_]\w*=", ws[k])):
+            k += 1
+        name = ws[k].rsplit("/", 1)[-1] if k < len(ws) else ""
+        if "$" in name:
+            return f"a command named by a variable or substitution: {ws[k]}"
+        for w in ws:
+            if re.match(r"GIT_CONFIG\w*=", w):
+                return f"git configuration set from the environment: {w}"
+        if full:
+            if name in ("cd", "pushd") and ws[k + 1:k + 2] in ([], ["-"]):
+                return "a change of folder outside the repo"
+            for j, w in enumerate(words):
+                if j == k + 3 and ws[k:k + 3] == ["uv", "run", "--script"] and shift_script(w, cwd):
+                    continue  # the state script, run from the plugin
+                if outside(w, cwd, roots):
+                    return f"a path outside the repo: {w[0]}"
+        for i, w in enumerate(ws):
+            base = w.rsplit("/", 1)[-1]
+            rest = [x for x in ws[i + 1:] if x != ";"]  # find -exec .. \;
+            why = git(rest, target) if base == "git" else gh(rest) if base == "gh" else None
+            if why:
+                return why
+            if re.search(r"[\s;&|]", w):  # a string that may be a command: sh -c, python -c
+                try:
+                    why = unsafe(w, cwd, target, full=full and name in SHELLS)
+                except Exception:  # not shell, or not only: read it with the quoting stripped
+                    if name in SHELLS:
+                        raise
+                    try:
+                        why = unsafe(re.sub(r"[\\'\"`$()]", " ", w), cwd, target, full=False)
+                    except Exception:
+                        why = None  # text, not a command
+                if why:
+                    return why
+    return None
+
+
+def shift_script(word, cwd):
+    p = re.sub(r"^\$(CLAUDE_PLUGIN_ROOT|\{CLAUDE_PLUGIN_ROOT\})(?=/|$)", str(PLUGIN), word[0])
+    roots = [PLUGIN, *([os.environ["CLAUDE_PLUGIN_ROOT"]] if os.environ.get("CLAUDE_PLUGIN_ROOT")
+                       else [])]
+    return os.path.realpath(os.path.join(cwd, p)) in {
+        os.path.realpath(os.path.join(r, "cli", "shift")) for r in roots}
+
+
+def outside(word, cwd, roots):
+    """True for a word naming a path outside the repo. A quoted word counts if it starts with ~
+    or it or its folder exists, so a quoted pattern ("/api/users") is not taken for a path."""
+    w, quoted = word
+    for p in {w, w.partition("=")[2]} - {""}:
+        p = re.sub(r"^\$(HOME|\{HOME\})(?=/|$)", "~", p)
+        p = re.sub(r"^\$(CLAUDE_PLUGIN_ROOT|\{CLAUDE_PLUGIN_ROOT\})(?=/|$)", str(PLUGIN), p)
+        tilde = p.startswith("~")
+        if tilde:
+            if not re.match(r"~(/|$)", p):
+                return True  # ~user
+            p = str(Path.home()) + p[1:]
+        if not (p.startswith("/") or ".." in p.split("/")):
+            continue
+        real = os.path.realpath(os.path.join(cwd, p))
+        if DEVICES.fullmatch(real) or any(real == r or real.startswith(r + os.sep) for r in roots):
+            continue
+        if not quoted or tilde or os.path.exists(real) or os.path.exists(os.path.dirname(real)):
+            return True
+    return False
+
+
+def git(args, target):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        key = args[i + 1] if a in ("-c", "--config-env") and i + 1 < len(args) else (
+            a.partition("=")[2] if a.startswith("--config-env=") else "")
+        if GIT_CONFIG.match(key):
+            return f"git configuration that changes pushes or remotes: {a} {key}"
+        i += 2 if a in GIT_VALUE else 1
+    if i >= len(args):
+        return None
+    sub, rest = args[i], args[i + 1:]
+    if subprocess.run(["git", "config", "--get", f"alias.{sub}"], cwd=target,
+                      capture_output=True).returncode == 0:
+        return f"a git alias, which the guard cannot follow: git {sub}"
+    short = "".join(a[1:] for a in rest if re.match(r"-[^-]", a))
+    long = [a.split("=")[0] for a in rest if a.startswith("--") and len(a.split("=")[0]) > 3]
+    if sub == "push":
+        return push(rest)
+    if sub == "branch" and (set(short) & {"d", "D"} or any("--delete".startswith(a) for a in long)):
+        return "a branch delete"
+    if sub == "update-ref" and {"-d", "--stdin"} & set(rest) or sub == "send-pack":
+        return f"a ref change outside the guard's reading: git {sub}"
+    if sub == "remote" and next((a for a in rest if not a.startswith("-")), None) not in (
+            None, "show", "get-url"):
+        return "a change to the remotes"
+    if sub == "config":
+        pos = [a for a in rest if not a.startswith("-")]
+        writes = {"--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
+                  "--remove-section"} & set(rest) or pos[:1] in (
+            ["set"], ["unset"], ["rename-section"], ["remove-section"])
+        reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"} & set(
+            rest) or pos[:1] in (["get"], ["list"])
+        if {"-e", "--edit"} & set(rest) or pos[:1] == ["edit"] or any(
+                GIT_CONFIG.match(a) for a in pos) and (writes or len(pos) > 1 and not reads):
+            return "a change to git configuration for pushes or remotes"
+    return None
+
+
+def push(args):
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            pos += args[i:]
+            break
+        if a.startswith("--"):
+            name = a.split("=")[0]
+            if len(name) > 3 and any(b.startswith(name) for b in PUSH_BAD):  # git takes prefixes
+                return f"a {a} push"
+            i += name in PUSH_VALUE and "=" not in a
+        elif a.startswith("-") and len(a) > 1:
+            if set(a[1:]) & {"f", "d"}:
+                return f"a {a} push (force or delete)"
+            i += a == "-o"
+        else:
+            pos.append(a)
+    if len(pos) < 2:
+        return "a push that names no branch: push as `git push origin third-shift/<slug>`"
+    for r in pos[1:]:
+        if not SHIFT_REF.fullmatch(r) or ".." in r:
+            return f"a push of {r}, which is not a third-shift/* branch"
+    return None
+
+
+def gh(args):
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("-R", "--repo", "--hostname"):
+            i += 1
+        elif not a.startswith("-"):
+            pos.append(a)
+    group, action, more = (pos + [""] * 3)[:3]
+    if group == "api":
+        method, fields, endpoint, i, j = None, [], None, 0, args.index("api") + 1
+        rest = args[j:]
+        while i < len(rest):
+            a = rest[i]
+            i += 1
+            if a in GH_API_VALUE:
+                v = rest[i] if i < len(rest) else ""
+                i += 1
+                if a in ("-X", "--method"):
+                    method = v
+                elif a in ("-f", "-F", "--field", "--raw-field", "--input"):
+                    fields.append(v)
+            elif a.startswith("-X") or a.startswith("--method="):
+                method = a.removeprefix("-X").removeprefix("--method=")
+            elif a.startswith(("-f", "-F")) or a.startswith(("--field=", "--raw-field=")):
+                fields.append(a.split("=", 1)[-1])
+            elif not a.startswith("-") and endpoint is None:
+                endpoint = a
+        method = (method or ("POST" if fields else "GET")).upper()
+        if method == "DELETE" or method != "GET" and (
+                GH_API_RISKY.search(endpoint or "") or endpoint == "graphql" and any(
+                    GH_MUTATION.search(f) for f in fields)):
+            return f"a destructive GitHub API call: {method} {endpoint}"
+        return None
+    if any(a.split("=")[0] == "--delete-branch" for a in args):
+        return f"a branch delete: gh {group} {action} --delete-branch"
+    if GH_BAD.search(action) or group == "repo" and (
+            action in ("edit", "set-default") or action in ("deploy-key", "autolink")
+            and GH_BAD.search(more)) or group == "alias" and action in ("set", "import"):
+        return f"a destructive gh command: gh {group} {action}"
+    return None
+
+
+def fingerprint(path):  # a refusal is not progress
+    ledger = json.loads(path.read_text())
+    ledger.pop("refused", None)
+    return hashlib.sha256(json.dumps(ledger, sort_keys=True).encode()).hexdigest()
+
+
+def remaining(ledger):
+    """Tickets the shift can still move: the frontier, the ticket in progress, and Backlog
+    tickets whose blockers are all Done, which `next` has yet to make Ready."""
+    tickets = ledger["tickets"]
+    done = {n for n, t in tickets.items() if t["state"] == "Done"}
+    return [f"#{o['number']} is {tickets[str(o['number'])]['state']}"
+            for o in ledger["opening"]["tickets"]
+            if tickets[str(o["number"])]["state"] in ("Ready", "In progress")
+            or tickets[str(o["number"])]["state"] == "Backlog"
+            and {str(b) for b in o["blocked_by"]} <= done]
+
+
+def set_aside(path, name, message):
+    """Commit uncommitted work to refs/third-shift/<spec-slug>/<name>, the tree untouched."""
+    if not run("git", "status", "--porcelain"):
+        return None
+    ref = f"refs/third-shift/{path.stem}/{name}"
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp, "index"))}
+        run("git", "add", "-A", env=env)
+        tree = run("git", "write-tree", env=env)
+    run("git", "update-ref", ref, run("git", "commit-tree", tree, "-p", "HEAD", "-m", message))
+    return ref
+
+
+def save_aside(path, ledger, message, ref):
+    """save(), pushing the set-aside ref with the ledger; then restart from the last commit."""
+    try:
+        save(path, ledger, message, *([f"{ref}:{ref}"] if ref else []))
+    except Exception:
+        if ref:
+            subprocess.run(["git", "update-ref", "-d", ref], capture_output=True)
+        raise
+    if ref:
+        run("git", "reset", "-q", "--hard")
+        run("git", "clean", "-q", "-fd", "--", ":/")
+
+
+def death(state_file):
+    """Whether the shift is dead (spec: Revival), and why."""
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    if not state.get("armed"):
+        return False, "no shift is armed"
+    stop = state_file.with_name("STOP").exists()  # it lifts the exemptions: nobody hands over else
+    if not stop and (state["shift_state"] == "waiting" or state.get("pause") == "owner"):
+        return False, f"{state['shift_state']} on the builder"  # map #10: never dead
+    beat = state_file.with_name("heartbeat")
+    last = max(datetime.fromisoformat(t) for t in (
+        state["since"], *([json.loads(beat.read_text())["at"]] if beat.exists() else [])))
+    deadline = last + SILENCE
+    if state["shift_state"] == "paused" and not stop:  # a planned pause: dead only past the reset + 15 min
+        deadline = max(deadline, datetime.fromisoformat(state["until"]) + PAUSE_GRACE)
+    if datetime.fromisoformat(now()) < deadline:
+        return False, f"{state['shift_state']}; dead from {deadline.isoformat()} if silent"
+    return True, f"{state['shift_state']} and silent since {last.isoformat()}" + (", stop file" if stop else "")
+
+
+def is_dead(a):
+    """The watchman's session may start outside the target (ADR 0004 amended by #38): named,
+    the repo is found in runtime state, and the answer gives its folder and a one-off cron
+    (now plus 3 minutes) to continue there."""
+    if a.repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo) or ".." in (a.repo or ""):
+        refuse(f"not an owner/repo: {a.repo!r}")
+    state_file = runtime(a.repo or this_repo())
+    dead, why = death(state_file)
+    target = state_file.exists() and json.loads(state_file.read_text()).get("target")
+    out({"ok": True, "dead": dead, "why": why, **({"target": target, "continue_cron": cron(now())}
+                                                  if target else {})})
+
+
+def revive(a):
+    repo, path, ledger = load()
+    state_file = runtime(repo)
+    dead, why = death(state_file)
+    if not dead:
+        refuse(f"the shift is not dead: {why}")
+    state = json.loads(state_file.read_text())
+    if state_file.with_name("STOP").exists():  # the builder asked to stop: hand over, no revival
+        out(finish(repo, path, ledger, "stop file", stop_file=True))
+    gen, revivals = state["gen"] + 1, state.get("revivals", 0) + 1
+    n = next((n for n, t in ledger["tickets"].items() if t["state"] == "In progress"), None)
+    if n:
+        t = ledger["tickets"][n]
+        t["crashes"] = t.get("crashes", 0) + 1
+        if t["crashes"] >= CRASHES:
+            t.update(state="Needs you", reason="set aside after a crash",
+                     why=f"in progress during {t['crashes']} crashes")
+    ref = set_aside(path, f"set-aside-{gen}", f"third-shift: set aside at revival {gen}")
+    if state["shift_state"] == "paused":  # spec: a revival is a transition back to running
+        ledger["pauses"][-1]["resumed"] = now()
+    ledger.setdefault("revivals", []).append({"at": now(), "gen": gen,
+                                              "ticket": n and int(n), "set_aside": ref})
+    # spec: restart the ticket from its last commit
+    save_aside(path, ledger, f"ledger: #{ledger['opening']['spec']['number']} revived", ref)
+    retired = [*state.get("retired", []), *([state["session_id"]] if "session_id" in state else [])]
+    state = {k: v for k, v in state.items() if k not in ("session_id", "until", "pause", "gate_end", "step")}
+    write_atomic(state_file, json.dumps({**state, "gen": gen, "revivals": revivals, "since": now(),
+                                      "retired": retired,  # the next hook, never these, claims
+                                      "shift_state": "running"}) + "\n")
+    result = {"gen": gen, "revivals": revivals, "ticket": n and int(n),
+              "ticket_state": n and ledger["tickets"][n]["state"], "set_aside": ref,
+              "stop_file": False, "watchman": state.get("watchman")}  # named in the revival's notification
+    if revivals >= REVIVALS:
+        out(finish(repo, path, ledger, "three revivals", **result))
+    out({"ok": True, **result, "shift_state": "running", **mirror(repo, path, ledger)})
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):  # ADR 0003 keeps exit 2 for a lost lease
+        refuse(message)
+
+
+def at_least(low):
+    def check(v):
+        if int(v) < low:
+            raise ValueError(v)
+        return int(v)
+    check.__name__ = f"whole number {low} or more"  # argparse names the type in its error
+    return check
+
+
+def percent(v):
+    if not 0 <= int(v) <= 100:
+        raise ValueError(v)
+    return int(v)
+
+
+def ceiling_value(v):
+    return None if v == "none" else percent(v)
+
+
+ceiling_value.__name__ = "ceiling 0 to 100, or none"
+
+
+def text(v):
+    if not v.strip():
+        raise ValueError(v)
+    return v
+
+
+text.__name__ = "non-blank text"
+
+
+def timestamp(v):
+    datetime.fromisoformat(v)
+    return v
+
+
+def zoned(v):
+    if datetime.fromisoformat(v).tzinfo is None:
+        raise ValueError(v)
+    return v
+
+
+zoned.__name__ = "timestamp with a timezone"
+
+
+def main():
+    p = Parser(prog="shift")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("arm")
+    s.add_argument("--prescan", required=True)
+    s.add_argument("--sitting", required=True)
+    s.add_argument("--mode", required=True, choices=["day", "away"])
+    s.add_argument("--ceiling", default=str(CEILING))
+    s.add_argument("--watchman")
+    s = sub.add_parser("next")
+    s.add_argument("--gen", type=int, required=True)
+    for cmd in ("admit", "step"):
+        s = sub.add_parser(cmd)
+        s.add_argument("ticket", type=int)
+        s.add_argument("--gen", type=int, required=True)
+        s.add_argument("--5h", dest="five_hour", type=percent)
+        s.add_argument("--reset", type=zoned)
+        s.add_argument("--weekly", action="append", type=percent)
+        s.add_argument("--unreadable", action="store_true")
+        s.add_argument("--guess", type=at_least(0))
+    s.add_argument("--begin", action="store_true")
+    s.add_argument("--role", required=True, choices=ROLES)
+    s.add_argument("--round", type=at_least(1))
+    for f in ("model", "effort", "outcome"):
+        s.add_argument(f"--{f}")
+    for f in ("before-5h", "before-weekly", "after-5h", "after-weekly"):
+        s.add_argument(f"--{f}", type=percent)
+    for f in ("start", "end"):
+        s.add_argument(f"--{f}", type=timestamp)
+    s.add_argument("--tokens", type=at_least(0))
+    s = sub.add_parser("done")
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--comment", required=True)
+    for cmd, flags in (("needs-you", ("reason", "why")), ("stall", ("why",)), ("release", ())):
+        s = sub.add_parser(cmd)
+        s.add_argument("ticket", type=int)
+        s.add_argument("--gen", type=int, required=True)
+        for f in flags:
+            s.add_argument(f"--{f}", required=True, type=text, **(
+                {"choices": REASONS} if f == "reason" else {}))
+    s.add_argument("--decision", type=text)
+    s = sub.add_parser("note")
+    s.add_argument("kind", choices=("decision", "owed", "nit"))
+    s.add_argument("ticket", type=int)
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--text", required=True, type=text)
+    s.add_argument("--for", dest="for_", type=int)
+    s = sub.add_parser("pause")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--reason", required=True, choices=("usage", "owner"))  # spec: Shift states
+    s.add_argument("--until", required=True, type=zoned)
+    s = sub.add_parser("resume")
+    s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("ceiling")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("value", type=ceiling_value)
+    s = sub.add_parser("wait")
+    s.add_argument("--gen", type=int, required=True)
+    s = sub.add_parser("end")
+    s.add_argument("--gen", type=int, required=True)
+    s.add_argument("--reason", required=True, type=text)
+    s.add_argument("--findings")
+    s.add_argument("--candidates")
+    s = sub.add_parser("setup-board")
+    s.add_argument("--spec", type=int, required=True)
+    for cmd in ("heartbeat", "stop-check", "revive", "guard", "deny-prompt", "refused"):
+        sub.add_parser(cmd)
+    sub.add_parser("is-dead").add_argument("repo", nargs="?")
+    a = p.parse_args()
+    try:
+        {"arm": arm, "next": next_, "admit": admit, "step": step, "done": done,
+         "needs-you": needs_you, "stall": stall, "release": release, "note": note,
+         "pause": pause, "resume": resume, "ceiling": ceiling, "wait": wait, "end": end, "heartbeat": heartbeat,
+         "stop-check": stop_check, "is-dead": is_dead, "revive": revive, "guard": guard,
+         "deny-prompt": deny_prompt, "refused": refused, "setup-board": setup_board}[a.cmd](a)
+    except subprocess.CalledProcessError as e:
+        refuse(f"{' '.join(e.cmd)} failed: {(e.stdout + e.stderr).strip()}")
+    except Exception as e:  # ADR 0003: one JSON object, never a stack trace
+        refuse(f"{type(e).__name__}: {e}")
+
+
+if __name__ == "__main__":
+    main()
