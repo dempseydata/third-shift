@@ -1,0 +1,92 @@
+diff --git a/src/export.js b/src/export.js
+new file mode 100644
+--- /dev/null
++++ b/src/export.js
+@@ -0,0 +1,33 @@
++const fs = require("node:fs");
++const path = require("node:path");
++
++function cell(value) {
++  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
++}
++
++function exportCsv(home, out, err) {
++  let raw = "";
++  try {
++    raw = fs.readFileSync(path.join(home, "journal.jsonl"), "utf8");
++  } catch {
++    // no journal yet: export just the header
++  }
++  const lines = raw.split("\n");
++  if (lines[lines.length - 1] === "") lines.pop(); // ADR 0001: a blank last line is skipped
++  const entries = [];
++  for (const line of lines) {
++    try {
++      entries.push(JSON.parse(line));
++    } catch {
++      err.write("quill: the journal has an unreadable line\n");
++      return 3;
++    }
++  }
++  out.write("time,text\n");
++  for (const { time, text } of entries) {
++    out.write(`${cell(time)},${cell(text)}\n`);
++  }
++  return 0;
++}
++
++module.exports = { exportCsv };
+diff --git a/src/quill.js b/src/quill.js
+--- a/src/quill.js
++++ b/src/quill.js
+@@ -1,5 +1,6 @@
+ const path = require("node:path");
+ const { add } = require("./add");
+ const { list } = require("./list");
++const { exportCsv } = require("./export");
+ 
+ function main(argv, env) {
+@@ -12,6 +13,9 @@ function main(argv, env) {
+   if (command === "list") {
+     return list(home, process.stdout);
+   }
++  if (command === "export") {
++    return exportCsv(home, process.stdout, process.stderr);
++  }
+   process.stderr.write("usage: quill add <text> | list | export\n");
+   return 1;
+ }
+diff --git a/test/export.test.js b/test/export.test.js
+new file mode 100644
+--- /dev/null
++++ b/test/export.test.js
+@@ -0,0 +1,29 @@
++const { test } = require("node:test");
++const assert = require("node:assert");
++const { run, home } = require("./helpers");
++
++test("prints a header row then one row per entry, oldest first", () => {
++  const h = home();
++  run(h, "add", "first");
++  run(h, "add", "second");
++  const { stdout, code } = run(h, "export");
++  assert.strictEqual(code, 0);
++  const rows = stdout.trim().split("\n");
++  assert.strictEqual(rows[0], "time,text");
++  assert.match(rows[1], /,first$/);
++  assert.match(rows[2], /,second$/);
++});
++
++test("quotes a comma or quote in an entry", () => {
++  const h = home();
++  run(h, "add", 'said "hi", left');
++  const { stdout } = run(h, "export");
++  assert.match(stdout, /,"said ""hi"", left"\n$/);
++});
++
++test("exports just the header when there is no journal", () => {
++  const h = home();
++  const { stdout, code } = run(h, "export");
++  assert.strictEqual(code, 0);
++  assert.strictEqual(stdout, "time,text\n");
++});

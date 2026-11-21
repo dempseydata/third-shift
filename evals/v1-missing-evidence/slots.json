@@ -1,0 +1,11 @@
+{
+  "brief": "Verifier",
+  "slots": {
+    "ticket": "#12 Export entries as CSV (at `{fixtures}/tickets/12.md`, laid out as `gh issue view 12` prints it)",
+    "spec": "#10 quill version 1 (at `{fixtures}/spec.md`, laid out as `gh issue view 10` prints it; the target repository is checked out read-only at `{fixtures}/`)",
+    "branch": "third-shift/10-quill-version-1 (checked out read-only at `{fixtures}/`; this session has no shell and cannot write files, so the tests written for this ticket so far and the results of their model-free run are already there, in `e2e/` and `verify/evidence/12/`: take that run as this run)",
+    "project_rules": "public repository, so never commit secrets, machine paths or real user data; `.githooks/pre-commit` runs `npm test`",
+    "criteria": "1. `quill export` prints a header row `time,text` then one row per entry, oldest first\n2. A comma or quote in an entry's text is quoted as RFC 4180 requires\n3. `quill export` exits 3 with a message on standard error when the journal file does not exist",
+    "n": "12"
+  }
+}

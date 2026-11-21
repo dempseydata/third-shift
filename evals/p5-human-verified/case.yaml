@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p5-human-verified
+description: 'Prescan: one criterion of #13 needs a person''s judgement.'
+tags: [prescan]
+expected_outcome: '#13 listed as human-verified. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '#13\b[^\n]{0,200}human[- ]verified|human-verified[^\n]{0,200}#13\b|human-verified[^\n]*\n[-*\s]*(\d+[.)]\s*)?#13\b'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if #13 is listed as human-verified, quoting or naming its criterion that the output is easy to scan and does not feel cluttered, because judging that needs a person. FAIL if #13 is listed only as agent, or as human (needing a person to build it).'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

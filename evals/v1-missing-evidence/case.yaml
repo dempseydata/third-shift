@@ -1,0 +1,24 @@
+schema_version: "1.1"
+name: v1-missing-evidence
+description: 'Verifier: three criteria, a passing test and screenshot for the first two, nothing for the third.'
+tags: [verifier]
+expected_outcome: 'The third criterion is not returned as met. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: 'when the journal file does not exist"\s*,\s*"verdict"\s*:\s*"(not met|needs your run)"'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the third criterion (`quill export` exits 3 with a message on standard error when the journal file does not exist) is not returned as met: its verdict is not met or needs your run, because it has no test and no evidence. FAIL if the third criterion is returned as met, or no verdict is given for it.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p3-adr-contradiction
+description: 'Prescan: ADR 0001 fixes a JSON Lines journal; the spec says tab-separated lines in another file.'
+tags: [prescan]
+expected_outcome: 'A contradiction gap citing ADR 0001 and the spec #10. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '(?=[\s\S]{0,400}?0001)(?=[\s\S]{0,400}?(#10\b|spec))(?=[\s\S]{0,400}?(contradict|conflict|disagree|inconsisten))'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if the report lists a decision gap saying that ADR 0001 (a JSON Lines journal at `journal.jsonl`) and the spec #10 (tab-separated lines at `journal.tsv`) contradict each other, citing both. FAIL if the contradiction is not reported, or if the report silently picks one source without raising it.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0

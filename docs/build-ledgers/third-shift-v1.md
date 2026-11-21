@@ -17,7 +17,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #29 | closed | 3e2fd44 | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
 | #30 | closed | 417282f | 1 | 177 tests, 58 s | cli/prescan reads the ticket set; base = default branch; round-1 fix checked by the orchestrator (incl. under uv), not re-reviewed |
 | #31 | closed | 310ceb5 | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
-| #32 | closed | (this commit) | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
+| #32 | closed | 5a9451f | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
+| #33 | open (human-verified) | (this commit) | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -35,7 +36,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #35: write user settings from `cli/rules.json`; confirm its `uv run --script *cli/shift*` / `*cli/prescan*` allow patterns match how the skills actually call the scripts (from #31 review).
 - #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
 - #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
-- #33, #34: no command takes the Prescan role's starting-cost guess (only `admit`/`step --begin` take `--guess`); and briefs have no rule for a missing `verify/recipe.md` (from #32 review).
+- #34: no command takes the Prescan role's starting-cost guess (only `admit`/`step --begin` take `--guess`); and briefs have no rule for a missing `verify/recipe.md` (from #32 review).
 - later (#37): a mid-shift ceiling waiver (map #6, spec) has no command yet; ceiling is set only at arm (from #24 review).
 
 ## Decisions
@@ -116,6 +117,10 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #32: verifier files `e2e/<n>-<k>.spec.ts`, evidence under `verify/evidence/<n>/` (`<k>.png`, `report.json`, `<k>-steps.md`; a needs-your-run criterion gets a steps file, since done refuses a row without evidence) — ADR? yes (the evidence layout the eval set and targets depend on)
 - #32: reviewers treat an unpaid owed entry and an unsettled hard-to-reverse decision as must-fix; implementers build test-first with `tdd` (the `implement` skill is user-invoked only) — ADR? no
 
+- #33: fixtures live inside each case (the eval tool refuses map #19's shared `evals/fixtures/`); rendered prompts are generated and git-ignored (they hold absolute `add_dirs` paths) — ADR? yes (departs from map #19)
+- #33: cases allow read-only Read, Glob, Grep (listing is not a grant), with a `tool_used: Bash, max: 0, min: 0` guard; model per the role table; Haiku judge; 30 turns, 900 s — ADR? no
+- #33: the tool cannot express 2-of-3 / 3-of-3 pass marks; each case states its mark and the builder judges from per-run results; the first run is recorded in committed `evals/FROZEN.md`, raw output kept in ignored `local-data/` — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -158,3 +163,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #31: a webServer the Playwright runner never stops (detached, own group) is beyond the timeout's reach
 - #31: GH_TOKEN with a classic token not checked
 - #32: long lines in briefs.md not re-wrapped
+- #33: R1's regex still passes a CLEAN verdict that mentions MUST-FIX without "no" just before it (the LLM rubric is the backstop)
+- #33: wrong answers some regexes still pass (P1 "no gaps" listing the tickets; single-line P5/P6) — the rubric must catch them
+- #33: V1's evidence PNGs are 1×1 pixel
+- #33: how `plugin eval` combines regex and rubric graders into one run's pass is unchecked

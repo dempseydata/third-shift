@@ -1,0 +1,8 @@
+{
+  "brief": "Prescan",
+  "slots": {
+    "spec": "#10 quill version 1 (at `{fixtures}/spec.md`, laid out as `gh issue view 10` prints it; the target repository is checked out read-only at `{fixtures}/`)",
+    "sources": "ADR 0001 (`{fixtures}/adr/0001.md`), then closed decision tickets (none), then the spec #10, then everything else only where those are silent",
+    "tickets": "- #11 Add and list entries - labels: ready-for-agent - blocked by: none - full text: `{fixtures}/tickets/11.md`\n  Criteria:\n    1. `quill add \"Shipped the export\"` appends one entry to the journal file and exits 0\n    2. `quill add` with no text prints usage to standard error and exits 1\n    3. `quill list` prints one line per entry, newest first, as `<time>  <text>` (two spaces)\n- #12 Export entries as CSV - labels: ready-for-agent - blocked by: #11 - full text: `{fixtures}/tickets/12.md`\n  Criteria:\n    1. `quill export` prints a header row `time,text` then one row per entry, oldest first\n    2. A comma or quote in an entry's text is quoted as RFC 4180 requires\n    3. `quill export` exits 3 with a message on standard error when the journal file does not exist\n- #13 Back up the journal to Dropbox - labels: ready-for-agent - blocked by: #11 - full text: `{fixtures}/tickets/13.md`\n  Criteria:\n    1. `quill backup` uploads the journal file to `/Apps/quill/journal.jsonl` and prints the uploaded file's revision\n    2. `quill backup` with `QUILL_DROPBOX_KEY` unset exits 1 with a message on standard error\n    3. `quill backup` exits 3 with a message on standard error when the journal file does not exist"
+  }
+}

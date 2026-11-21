@@ -1,0 +1,25 @@
+schema_version: "1.1"
+name: p6-human
+description: 'Prescan: building #13 needs an outside account, a registered Dropbox app.'
+tags: [prescan]
+expected_outcome: '#13 listed as human: a person must build it. Passes at 2 of 3 runs.'
+runs: 3
+context:
+  add_dirs: [fixtures]
+execution:
+  max_turns: 30
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep]
+graders:
+  - name: regex
+    type: regex
+    pattern: '#13\b[^\n]{0,200}\bhuman\b(?![- ]verified)|\bhuman\b(?![- ]verified)[^\n]{0,200}#13\b|\bhuman\b(?![- ]verified)[^\n]*\n[-*\s]*(\d+[.)]\s*)?#13\b'
+    flags: 'i'
+  - name: rubric
+    type: llm
+    criteria: 'PASS if #13 is listed under Human, as a ticket whose building needs a person, because it needs a Dropbox account and a registered Dropbox app (an outside account). Listing it as human-verified as well does not fail the case. FAIL if #13 is not listed as human.'
+  - name: no-bash
+    type: tool_used
+    tool: Bash
+    min: 0
+    max: 0
