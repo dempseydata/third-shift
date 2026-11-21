@@ -3,6 +3,7 @@
 import json
 import unittest
 
+from tests.test_shift import SLUG
 from tests.test_tickets import BRANCH, Armed
 
 
@@ -182,6 +183,7 @@ class DayFastForward(Gated):
         self.assertEqual((code, out["end_state"]), (0, "fast-forward"), out)
         self.assertEqual(self.git("log", "-1", "--format=%s", "main", cwd=self.remote),
                          "ledger: #20 ended")
+        self.git("cat-file", "-e", f"main:docs/third-shift-ledger/{SLUG}.handover.md", cwd=self.remote)
         self.assertEqual(self.git("rev-parse", "main", cwd=self.remote),
                          self.git("rev-parse", BRANCH, cwd=self.remote))
 

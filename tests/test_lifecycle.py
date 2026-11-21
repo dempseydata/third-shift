@@ -154,7 +154,8 @@ class InProgress(Working):
         code, out = self.shift("end", "--gen", "1", "--reason", "frontier empty")
         self.assertEqual(code, 0, out)
         self.assertEqual((out["shift_state"], out["end_state"]), ("ended", "branch"))
-        self.assertEqual(self.ledger()["end"], {"reason": "frontier empty", "end_state": "branch"})
+        end = self.ledger()["end"]
+        self.assertEqual((end["reason"], end["end_state"]), ("frontier empty", "branch"))
         self.assert_ledger_commit("ledger: #20 ended")
         self.assertEqual(self.git("rev-parse", "main", cwd=self.remote), main)
         state = self.runtime()

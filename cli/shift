@@ -26,7 +26,11 @@ Every command prints one JSON object on stdout; exit 0 done, 1 refused, 2 lease 
   note decision|owed|nit <ticket> --gen N --text T [--for <later ticket>]   --for only, and
        always, for owed
   wait --gen N
-  end --gen N --reason R   applies the sitting's end state, then disarms
+  end --gen N --reason R [--findings <file>] [--candidates <file>]   writes the handover
+       beside the ledger (<spec-slug>.handover.md) from the ledger, the tracker's sub-issues and
+       the two files (security-preflight's findings; the ADR candidates, the model's view, as
+       markdown), applies the sitting's end state, then disarms. The handover replaces the
+       shift status comment
   heartbeat   the hook's entry point (hooks/hooks.json): reads the hook's JSON on stdin; the
        first hook after arm or revive claims the lease for its session_id (ADR 0004)
   stop-check  the Stop hook's entry point: prints only the hook's decision, {} to let the session
@@ -172,10 +176,14 @@ def write_ledger(path, ledger):
         f"{o['mode']} mode, threshold {o['threshold']}%, ceiling "
         f"{'waived' if o['ceiling'] is None else str(o['ceiling']) + '%'} · end state {o['end_state']}",
         "", "| Ticket | Title | Class | State |", "| --- | --- | --- | --- |", *rows, ""]))
+    if "end" in ledger:  # ADR 0002: the handover copy sits beside the ledger; cleaned as the comment is
+        path.with_suffix(".handover.md").write_text(handover(ledger).replace(
+            str(path.absolute().parents[2]), ".").replace(str(Path.home()), "~") + "\n")
 
 
 def commit_ledger(path, branch, message, *also):
-    paths = [str(path), str(path.with_suffix(".md"))]
+    paths = [str(p) for p in (path, path.with_suffix(".md"), path.with_suffix(".handover.md"))
+             if p.exists()]
     if run("git", "status", "--porcelain", "--", *paths):
         run("git", "add", *paths)
         run("git", "commit", "-q", "-m", message, "--", *paths)  # only the ledger, never staged work
@@ -267,6 +275,9 @@ def arm(a):
         subprocess.run(["git", "checkout", "-q", was_on], capture_output=True)
         subprocess.run(["git", "branch", "-q", "-D", branch], capture_output=True)
         raise
+    log = state_file.with_name("refusals.jsonl")  # a new shift starts its own; the old is kept
+    if log.exists():
+        log.rename(log.with_name(f"refusals.{re.sub(r'[^0-9T]', '', now()[:19])}Z.jsonl"))
     out({"ok": True, "gen": 1, "branch": branch, "ledger": str(rel),
          **mirror(prescan["repo"], path, ledger)})
 
@@ -320,16 +331,21 @@ def next_(a):
 
 def save(path, ledger, message, *also):
     """Write, commit and push the ledger; on any failure put the files, index and HEAD back."""
-    md = path.with_suffix(".md")
-    prior = path.read_text(), md.read_text(), run("git", "rev-parse", "HEAD")
+    md, hand = path.with_suffix(".md"), path.with_suffix(".handover.md")
+    prior = (path.read_text(), md.read_text(), run("git", "rev-parse", "HEAD"),
+             hand.read_text() if hand.exists() else None)
     try:
         write_ledger(path, ledger)
         commit_ledger(path, ledger["opening"]["branch"], message, *also)
     except Exception:  # a refusal writes nothing
         subprocess.run(["git", "reset", "-q", "--soft", prior[2]], capture_output=True)
-        subprocess.run(["git", "reset", "-q", "--", str(path), str(md)], capture_output=True)
+        subprocess.run(["git", "reset", "-q", "--", str(path), str(md), str(hand)], capture_output=True)
         path.write_text(prior[0])
         md.write_text(prior[1])
+        if prior[3] is None:
+            hand.unlink(missing_ok=True)
+        else:
+            hand.write_text(prior[3])
         raise
 
 
@@ -568,11 +584,21 @@ def now():
 
 
 def end(a):
-    out(finish(*load(a.gen), a.reason))
+    out(finish(*load(a.gen), a.reason, a.findings, a.candidates))
 
 
-def finish(repo, path, ledger, reason, **extra):
+def finish(repo, path, ledger, reason, findings=None, candidates=None, **extra):
     o = ledger["opening"]
+    top, private = str(path.parents[2]), str(Path.home())  # the handover may be public
+    given = [f and redact(Path(f).read_text().replace(top, ".").replace(private, "~"), 20000).strip()
+             for f in (findings, candidates)]
+    known = {t["number"] for t in o["tickets"]}
+    try:  # the one tracker read: sub-issues the prescan did not see
+        added = [{"number": i["number"], "title": i["title"]} for i in
+                 gh_list(f"repos/{repo}/issues/{o['spec']['number']}/sub_issues")
+                 if i["number"] not in known]
+    except Exception:  # an unreadable tracker does not keep a shift from ending
+        added = None
     also = []
     if o["end_state"] == "fast-forward":  # spec: the end state is applied at `end`
         head = re.search(r"^ref: refs/heads/(\S+)\tHEAD$",
@@ -580,7 +606,10 @@ def finish(repo, path, ledger, reason, **extra):
         if not head:
             refuse("cannot tell the default branch of origin")
         also = [f"{o['branch']}:refs/heads/{head[1]}"]  # a plain push: refused unless a fast-forward
-    ledger["end"] = {"reason": reason, "end_state": o["end_state"]}
+    log = runtime(repo).with_name("refusals.jsonl")  # spec: a refusal is never lost
+    ledger["end"] = {"reason": reason, "end_state": o["end_state"], "findings": given[0],
+                     "candidates": given[1], "added": added, "refused_off_ledger":
+                     [json.loads(r) for r in log.read_text().splitlines()] if log.exists() else []}
     save(path, ledger, f"ledger: #{o['spec']['number']} ended", *also)
     state_file = runtime(repo)  # disarmed only once pushed: until then end can run again
     write_atomic(state_file, json.dumps({**json.loads(state_file.read_text()), "armed": False,
@@ -811,12 +840,90 @@ def status_body(ledger, path, state):
                               ) if u["state"] in ("Needs you", "Stalled") else ""
         note = note.replace("|", "\\|").replace("\n", " ")
         rows.append(f"| #{t['number']} | {u['state']} | {note} |")
+    marker = f"<!-- third-shift status {path.stem} {o['base_commit']} -->"
+    if "end" in ledger:  # map #8: at the end the shift status becomes the handover
+        return f"{marker}\n{handover(ledger)}\n"
     return "\n".join([
-        f"<!-- third-shift status {path.stem} {o['base_commit']} -->",
-        f"### Shift status: {shift}", "",
+        marker, f"### Shift status: {shift}", "",
         f"Branch `{o['branch']}` · {count('Done')}/{len(tickets)} done · {count('Needs you')} need you"
         f" · {count('Stalled')} stalled · {count('In progress')} in progress", "",
         "| Ticket | State | Step or why |", "| --- | --- | --- |", *rows, ""])
+
+
+def handover(ledger):
+    """The handover (spec: The handover), from the ledger alone; `end` records in it what the
+    tracker and the model add. Its order is the spec's; it ends with the one model-free command."""
+    o, tickets, e = ledger["opening"], ledger["tickets"], ledger["end"]
+    titles = {str(t["number"]): t["title"] for t in o["tickets"]}
+    name = lambda n: f"#{n} {titles[n]}"
+    count = lambda s: sum(t["state"] == s for t in tickets.values())
+    steps, refused = ledger.get("steps", []), ledger.get("refused", []) + e.get("refused_off_ledger", [])
+    flat = lambda s: s.replace("\n", " ")  # free text: one line, so no heading can be injected
+    points = f"{'at least ' if any(s.get('lower_bound') for s in steps) else ''}" \
+             f"{sum(s['points'] for s in steps)} points"
+
+    def downstream(n):  # the open tickets that wait on n, directly or through another
+        waits, todo = [], [int(n)]
+        while todo:
+            m = todo.pop()
+            for t in o["tickets"]:
+                k = str(t["number"])
+                if m in t["blocked_by"] and k not in waits and tickets[k]["state"] != "Done":
+                    waits.append(k)
+                    todo.append(t["number"])
+        return ", ".join(f"#{k}" for k in waits) or "nothing"
+
+    need, done, left = [], [], []
+    for t in o["tickets"]:
+        n = str(t["number"])
+        u = tickets[n]
+        if u["state"] in ("Needs you", "Stalled"):
+            kind = "stalled" if u["state"] == "Stalled" else u.get("reason") or "human"
+            if kind == "human-verify":  # map #8: left open, with the steps to run
+                need.append(f"- **{name(n)}** · needs your run; close the issue after it:")
+                need += [f"  - [ ] {flat(r['criterion'])} · [steps]({r['evidence_url']})"
+                         for r in u["verdicts"] if r["verdict"] == "needs your run"]
+            else:
+                need.append(f"- **{name(n)}** · {'human work' if kind == 'human' else kind}" + (f": {flat(u['why'])}" if u.get("why") else ""))
+            need.append(f"  - waiting on it: {downstream(n)}")
+        elif u["state"] == "Done":
+            rows = u.get("verdicts")
+            done.append(f"- {name(n)} · " + (
+                f"{len(rows)} criteria met · evidence " + " ".join(
+                    f"[{i}]({r['evidence_url']})" for i, r in enumerate(rows, 1)) if rows
+                else "closed before the shift" if t["starting_state"] == "Done"
+                else "closed on the tracker, no evidence recorded"))
+        else:
+            left.append(f"{name(n)} ({u['state']})")
+    if left:
+        need.append(f"- Not reached: {', '.join(left)}")
+    nits = [f"- #{x['ticket']}: {flat(x['text'])}" for x in ledger.get("notes", []) if x["kind"] == "nit"]
+    usage = [f"| #{n} | {tickets[n]['usage']} |" for n in titles if "usage" in tickets[n]]
+    added = ("Unknown: the tracker could not be read at the end." if e["added"] is None
+             else "\n".join(f"- #{i['number']} {i['title']}" for i in e["added"]) or "None.")
+    end_state = ("the default branch fast-forwarded to it" if e["end_state"] == "fast-forward"
+                 else "the default branch untouched")
+    return "\n".join([
+        f"### {count('Done')}/{len(tickets)} done · {count('Needs you') + count('Stalled')} need you · "
+        f"{len(refused)} refused · {points}", "",
+        f"Handover of #{o['spec']['number']} {o['spec']['title']} · ended: {flat(e['reason'])} · "
+        f"work on `{o['branch']}`, {end_state}", "",
+        "#### Needs you", *(need or ["Nothing."]), "",
+        "#### Done", *(done or ["Nothing."]), "",
+        "#### Security findings (security-preflight)",
+        e["findings"] or "None.", "",
+        "#### ADR candidates (the model's view, not a decision)", e["candidates"] or "None.", "",
+        "#### Refused actions", f"{len(refused)} refused.",
+        *(f"- {r['at']} · stale lease · `{r['command']} --gen {r['gen']}` · the lease was at "
+          f"generation {r['lease']}" if "lease" in r else f"- {r['at']} · {r['by']} · "
+          + (f"#{r['ticket']} · " if r.get("ticket") else "")
+          + f"`{flat(r['input']).replace('`', chr(39))}` · {flat(r['why'])}" for r in refused), "",
+        "#### Sub-issues added after the prescan", added, "",
+        "<details><summary>Nits and per-ticket usage</summary>", "",
+        *(nits or ["No nits."]), "",
+        *(["| Ticket | Points |", "| --- | --- |", *usage] if usage else ["No steps recorded."]),
+        "", "</details>", "",
+        "Rerun all verification, model-free: `verify/checks`"])
 
 
 def table(rows):
@@ -1529,6 +1636,8 @@ def main():
     s = sub.add_parser("end")
     s.add_argument("--gen", type=int, required=True)
     s.add_argument("--reason", required=True, type=text)
+    s.add_argument("--findings")
+    s.add_argument("--candidates")
     s = sub.add_parser("setup-board")
     s.add_argument("--spec", type=int, required=True)
     for cmd in ("heartbeat", "stop-check", "is-dead", "revive", "guard", "deny-prompt",

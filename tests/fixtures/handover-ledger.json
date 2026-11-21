@@ -1,0 +1,263 @@
+{
+  "opening": {
+    "spec": {
+      "number": 20,
+      "title": "Widget version 1"
+    },
+    "repo": "acme/widget",
+    "branch": "third-shift/20-widget-version-1",
+    "base_commit": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "version": "0.1.0",
+    "mode": "away",
+    "threshold": 98,
+    "reserve": 5,
+    "ceiling": 80,
+    "end_state": "branch",
+    "baseline_seconds": 12.5,
+    "proven_commit": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+    "binding_sources": [
+      "docs/adr/",
+      "closed decision tickets",
+      "#20",
+      "briefs"
+    ],
+    "gaps": [],
+    "warnings": [],
+    "tickets": [
+      {
+        "number": 21,
+        "title": "First",
+        "class": "agent",
+        "starting_state": "Ready",
+        "blocked_by": [],
+        "criteria": [
+          "It runs",
+          "It logs"
+        ]
+      },
+      {
+        "number": 22,
+        "title": "Second",
+        "class": "agent",
+        "starting_state": "Backlog",
+        "blocked_by": [
+          21
+        ],
+        "criteria": [
+          "It works"
+        ]
+      },
+      {
+        "number": 23,
+        "title": "Human",
+        "class": "human",
+        "starting_state": "Needs you",
+        "blocked_by": [],
+        "criteria": [
+          "It works"
+        ]
+      },
+      {
+        "number": 24,
+        "title": "Old",
+        "class": "agent",
+        "starting_state": "Done",
+        "blocked_by": [],
+        "criteria": [
+          "It works"
+        ]
+      },
+      {
+        "number": 25,
+        "title": "Triage",
+        "class": "human-verified",
+        "starting_state": "Ready",
+        "blocked_by": [],
+        "criteria": [
+          "It runs",
+          "It looks right"
+        ]
+      },
+      {
+        "number": 26,
+        "title": "Fifth",
+        "class": "agent",
+        "starting_state": "Ready",
+        "blocked_by": [],
+        "criteria": [
+          "It works"
+        ]
+      },
+      {
+        "number": 27,
+        "title": "Third",
+        "class": "agent",
+        "starting_state": "Backlog",
+        "blocked_by": [
+          22
+        ],
+        "criteria": [
+          "It works"
+        ]
+      },
+      {
+        "number": 28,
+        "title": "Fourth",
+        "class": "agent",
+        "starting_state": "Backlog",
+        "blocked_by": [
+          27
+        ],
+        "criteria": [
+          "It works"
+        ]
+      }
+    ]
+  },
+  "tickets": {
+    "21": {
+      "state": "Done",
+      "usage": 10,
+      "verdicts": [
+        {
+          "criterion": "It runs",
+          "verdict": "met",
+          "evidence_url": "https://github.com/acme/widget/blob/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1/verify/evidence/21-runs.txt"
+        },
+        {
+          "criterion": "It logs",
+          "verdict": "met",
+          "evidence_url": "https://github.com/acme/widget/blob/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1/verify/evidence/21-logs.txt"
+        }
+      ]
+    },
+    "22": {
+      "state": "Needs you",
+      "reason": "blocker",
+      "why": "Is a missing price an error or zero?",
+      "usage": 3
+    },
+    "23": {
+      "state": "Needs you"
+    },
+    "24": {
+      "state": "Done"
+    },
+    "25": {
+      "state": "Needs you",
+      "reason": "human-verify",
+      "why": "needs your run: It looks right",
+      "usage": 4,
+      "verdicts": [
+        {
+          "criterion": "It runs",
+          "verdict": "met",
+          "evidence_url": "https://github.com/acme/widget/blob/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1/verify/evidence/25-runs.txt"
+        },
+        {
+          "criterion": "It looks right",
+          "verdict": "needs your run",
+          "evidence_url": "https://github.com/acme/widget/blob/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1/verify/evidence/25-recipe.md"
+        }
+      ]
+    },
+    "26": {
+      "state": "Stalled",
+      "why": "3 blocked stops in a row without progress"
+    },
+    "27": {
+      "state": "Backlog"
+    },
+    "28": {
+      "state": "Backlog"
+    }
+  },
+  "steps": [
+    {
+      "ticket": 21,
+      "role": "implementer",
+      "round": 1,
+      "model": "opus",
+      "effort": "high",
+      "before_5h": 10,
+      "before_weekly": 20,
+      "after_5h": 17,
+      "after_weekly": 21,
+      "start": "2026-11-20T01:00:00+00:00",
+      "end": "2026-11-20T01:20:00+00:00",
+      "tokens": 50000,
+      "outcome": "built",
+      "points": 7
+    },
+    {
+      "ticket": 21,
+      "role": "reviewer",
+      "round": 1,
+      "model": "opus",
+      "effort": "high",
+      "before_5h": 10,
+      "before_weekly": 20,
+      "after_5h": 13,
+      "after_weekly": 21,
+      "start": "2026-11-20T01:00:00+00:00",
+      "end": "2026-11-20T01:20:00+00:00",
+      "tokens": 50000,
+      "outcome": "built",
+      "points": 3
+    },
+    {
+      "ticket": 22,
+      "role": "implementer",
+      "round": 1,
+      "model": "opus",
+      "effort": "high",
+      "before_5h": 10,
+      "before_weekly": 20,
+      "after_5h": 13,
+      "after_weekly": 21,
+      "start": "2026-11-20T01:00:00+00:00",
+      "end": "2026-11-20T01:20:00+00:00",
+      "tokens": 50000,
+      "outcome": "built",
+      "points": 3
+    },
+    {
+      "ticket": 25,
+      "role": "implementer",
+      "round": 1,
+      "model": "opus",
+      "effort": "high",
+      "before_5h": 10,
+      "before_weekly": 20,
+      "after_5h": 14,
+      "after_weekly": 21,
+      "start": "2026-11-20T01:00:00+00:00",
+      "end": "2026-11-20T01:20:00+00:00",
+      "tokens": 50000,
+      "outcome": "built",
+      "points": 4
+    }
+  ],
+  "notes": [
+    {
+      "kind": "nit",
+      "ticket": 21,
+      "text": "a newline in a criterion breaks the table"
+    },
+    {
+      "kind": "decision",
+      "ticket": 21,
+      "text": "prices are integers in cents"
+    }
+  ],
+  "refused": [
+    {
+      "at": "2026-11-20T02:00:00+00:00",
+      "by": "guard",
+      "tool": "Bash",
+      "input": "git push origin main",
+      "why": "a push to main",
+      "ticket": 22
+    }
+  ]
+}

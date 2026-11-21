@@ -36,7 +36,8 @@ class Armed(Target):
         self.assertEqual(self.git("log", "-1", "--format=%s"), message)
         files = self.git("show", "--name-only", "--format=", "HEAD").splitlines()
         self.assertIn(str(LEDGER), files)
-        self.assertLessEqual(set(files), {str(LEDGER), str(LEDGER.with_suffix(".md"))})
+        self.assertLessEqual(set(files), {str(LEDGER), str(LEDGER.with_suffix(".md")),
+                                          str(LEDGER.with_suffix(".handover.md"))})
         self.assertEqual(self.git("rev-parse", "HEAD"),
                          self.git("rev-parse", BRANCH, cwd=self.remote))
         self.assertEqual(self.git("status", "--porcelain"), "")

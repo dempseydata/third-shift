@@ -13,7 +13,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #25 | closed | ed40762 | 2 | 101 tests, 26 s | lease, heartbeat, is-dead, revive, hooks.json; tests now threaded |
 | #26 | closed | 728efb1 | 1 | 118 tests, 32 s | stop-check and the Stop hook: block with work left, stall, three stalls end the shift |
 | #27 | open (human-verified) | 03d43fc | 2 | 140 tests, 37 s | guard, PermissionRequest deny, refusal log; foreground-subagent deny needs a live run |
-| #28 | closed | (this commit) | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope) |
+| #28 | closed | bf8427f | 2 | 157 tests, 46 s | setup-board, cards, status comment, resolution comments, close at done; round-2 one-liner checked by the orchestrator, not re-reviewed; real GitHub calls unrun (no `project` scope); first commit refused by denylist (fixture URL), issue closed before it landed, corrected |
+| #29 | closed | (this commit) | 2 | 165 tests, 50 s | handover rendered from the ledger, end state applied; round-2 fix checked by the orchestrator, not re-reviewed |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -87,6 +88,10 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #28: with no board, comments still post and done still closes; only cards are skipped (`mirror: behind: no board`) — ADR? no
 - #28: target folder → `.`, home → `~` in comments and Why — ADR? no
 
+- #29: the handover is `<slug>.handover.md` beside the ledger; findings, candidates and added sub-issues are stored in `ledger["end"]` so it renders from the ledger alone — ADR? no (ADR 0002)
+- #29: refusals logged off the ledger (refusals.jsonl) are read into `ledger["end"]` at end and counted with the ledger's; a successful arm archives the old log as `refusals.<UTC>.jsonl` — ADR? no
+- #29: an unreadable tracker reads "Unknown"; stalled and unreached tickets list under Needs you; Done rows link each criterion's evidence directly — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -119,3 +124,5 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #28: a stall from stop-check is not mirrored until the next command
 - #28: a card deleted by hand leaves a stale item id
 - #28: no GraphQL mutation has run against real GitHub; shapes checked only by schema introspection
+- #29: two successful arms in the same second would overwrite the first refusal archive
+- #29: the per-ticket usage table ignores `lower_bound`
