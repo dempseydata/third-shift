@@ -15,6 +15,7 @@
     "unattended"
   ],
   "skills": [
-    "./skills/start"
+    "./skills/start",
+    "./skills/setup"
   ]
 }

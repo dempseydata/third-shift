@@ -40,7 +40,8 @@ class PrescanTarget(Target):
     def setUp(self):
         super().setUp()
         self.user = self.tmp / "user"
-        self.settings = {"permissions": {"allow": RULES["allow"], "deny": RULES["deny"]},
+        self.settings = {"permissions": {"allow": RULES["allow"], "deny": RULES["deny"],
+                                         **RULES["set"]},
                          "enabledPlugins": {"third-shift@third-shift": True}, "model": "opus"}
         self.browser = self.tmp / "ms-playwright" / "chromium-1"
         self.browser.mkdir(parents=True)

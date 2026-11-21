@@ -1,7 +1,8 @@
 {
-  "about": "ADR 0006: the allow list and deny rules for user settings. setup writes them; the prescan checks every one is present. The guard hook, not these rules, is the safety boundary.",
+  "about": "ADR 0006: the allow list and deny rules for user settings, and the permissions keys in set (map #4). setup writes them; the prescan checks every one is present. The guard hook, not these rules, is the safety boundary.",
   "allow": [
     "Skill(third-shift:start)",
+    "Skill(third-shift:start *)",
     "Bash(uv run --script *cli/shift*)",
     "Bash(uv run --script *cli/prescan*)",
     "Bash(git status *)",
@@ -30,5 +31,8 @@
     "Bash(gh pr merge *)",
     "Bash(gh repo edit *)",
     "Bash(gh api -X DELETE *)"
-  ]
+  ],
+  "set": {
+    "blockWritesOutsideWorkingDirectories": true
+  }
 }

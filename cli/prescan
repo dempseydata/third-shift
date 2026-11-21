@@ -149,6 +149,7 @@ def environment(repo, top, default, base, branch):
     rules = json.loads(Path(__file__).with_name("rules.json").read_text())
     perms = (settings or {}).get("permissions") or {}
     missing = [r for k in ("allow", "deny") for r in rules[k] if r not in (perms.get(k) or [])]
+    missing += [f"permissions.{k}: {json.dumps(v)}" for k, v in rules["set"].items() if perms.get(k) != v]
     check("allow and deny rules", settings and not missing,
           f"missing from user settings: {', '.join(missing)}" if settings else "user settings unreadable")
     plugins = (settings or {}).get("enabledPlugins") or {}

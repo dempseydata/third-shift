@@ -79,6 +79,12 @@ class Environment(PrescanTarget):
                 self.assertEqual(self.failed(), ["allow and deny rules"])
                 self.settings["permissions"][kind] = whole
 
+    def test_writes_outside_working_directories_not_blocked(self):
+        for value in (None, False):
+            with self.subTest(value):
+                self.settings["permissions"]["blockWritesOutsideWorkingDirectories"] = value
+                self.assertEqual(self.failed(), ["allow and deny rules"])
+
     def test_no_user_settings(self):
         self.settings = None  # json "null": unreadable as settings
         self.assertEqual(self.failed(), ["allow and deny rules", "guard hooks"])

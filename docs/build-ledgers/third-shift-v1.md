@@ -19,7 +19,8 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 | #31 | closed | 310ceb5 | 1 | 203 tests, 72 s | prescan environment checks, cli/rules.json; round-1 fix checked by the orchestrator, not re-reviewed; real-tool shapes confirmed read-only |
 | #32 | closed | 5a9451f | 1 | 203 tests, 64 s | role table and briefs in skills/start/references/briefs.md, new verifier brief; round-1 wording fix checked by the orchestrator |
 | #33 | open (human-verified) | 8b2becd | 2 | 207 tests, 64 s | 8 eval cases, render script, FROZEN.md; not run — the first recorded run is the builder's; round-2 regex fix checked by the orchestrator |
-| #34 | open (human-verified) | (this commit) | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
+| #34 | open (human-verified) | 7b5779f | 1 | 209 tests, 72 s | start skill: prescan, sitting, ADRs, watchman, arm; `arm --watchman`; live-only, round-1 fix checked by the orchestrator |
+| #35 | open (human-verified) | (this commit) | 1 | 220 tests, 72 s | setup skill (per machine), cli/settings; live-only; round-1 fix checked by the orchestrator |
 
 ## Owed
 - #25: ~~prescan.json and sitting.json copied into runtime state~~ — paid in #25.
@@ -34,7 +35,7 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #31: ~~fill checks, baseline, Proven commit, warnings~~ — paid in #31.
 - #34: ~~prescan questions → sitting gaps~~ — paid in #34.
 - #31: ~~create ADR 0006's rules file~~ — paid in #31 (`cli/rules.json`).
-- #35: write user settings from `cli/rules.json`; confirm its `uv run --script *cli/shift*` / `*cli/prescan*` allow patterns match how the skills actually call the scripts (from #31 review).
+- #35: ~~settings from cli/rules.json; allow patterns match~~ — paid in #35.
 - #36: the recipe's `## Proven` section must name a commit, and the prescan treats the recipe as unchanged when the recipe (minus that section) and `playwright.config.*` match that commit — setup must write that format (from #31 review).
 - #37: the verifier reports evidence as a repo-relative `path#La-Lb`; the loop must convert it to `https://github.com/<repo>/blob/<ticket-commit sha>/<path>[#La-Lb]` before `done --comment` — written down nowhere yet (from #32 review).
 - #34: ~~Prescan usage; missing recipe~~ — paid in #34 (prescan usage not recorded, nothing is armed; a missing recipe fails `recipe proven`).
@@ -127,6 +128,11 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #34: the sitting's ADRs and the watchman are made BEFORE arm (after arm the session's own prompts are denied); a refused arm deletes both; class/edge questions sit in sitting.json with `"adr": null` — ADR? yes (the start sequence is forced by the PermissionRequest deny)
 - #34: the watchman runs every 15 min with prompt `/third-shift:start revive <owner/repo>`, `notifyOnCompletion` false; the id the tool returns is stored via `arm --watchman <id>` (ADR 0004) — ADR? no
 
+- #35: setup writes `permissions.blockWritesOutsideWorkingDirectories: true` (map #4, never amended) and the prescan checks it; it also binds the builder's attended sessions, the trade-off that dropped `denyInsteadOfPrompting` (map #9) — ADR? yes (builder may want to drop it)
+- #35: `Skill(third-shift:start *)` added beside the bare form, from the docs only (map #17 saw no prompt for a hook-less skill) — ADR? no
+- #35: cli/settings shows missing rules by default; `--write` appends them, keeps everything else, keeps the file's mode and symlink, refuses unreadable or read-only files, atomic — ADR? no
+- #35: the builder types `! gh auth refresh -s project` (browser sign-in); the Mac checklist runs first, so the Remote Control refusal and a missing uv refuse before any edit — ADR? no
+
 ## Blocked
 
 ## Nits
@@ -174,3 +180,4 @@ Sitting decisions: ADRs 0003–0007. Human-verified (built, left open): #27, #33
 - #33: V1's evidence PNGs are 1×1 pixel
 - #33: how `plugin eval` combines regex and rubric graders into one run's pass is unchecked
 - #34: whether `update_scheduled_task` (used when a stale watchman id is in use) returns an id is unchecked
+- #35: a dangling settings symlink creates the folder it points to
